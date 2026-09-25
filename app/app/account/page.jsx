@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useConnectModal } from "@rainbow-me/rainbowkit";
-import { useAccount } from "wagmi";
+import { useAccount, useChainId } from "wagmi";
 import { PiggyBank, RotateCcw, Trophy, TrendingUp, Wallet } from "lucide-react";
 import AccountPositionSummary from "@/components/app/AccountPositionSummary";
 import UserDepositsList from "@/components/app/UserDepositsList";
@@ -17,6 +17,11 @@ import VaultOnboardingTour, { useRestartTour } from "@/components/app/VaultOnboa
 import { useYieldCounter } from "@/components/hooks/useYieldCounter";
 import { formatUsd } from "@/lib/yield-counter";
 import { DEMO_PORTFOLIO, DEMO_TRANSACTIONS } from "@/lib/demo-portfolio";
+import { SUPPORTED_CHAINS } from "@/lib/wagmi";
+import {
+  parseAccountTestFixtures,
+  resolveAccountWalletState,
+} from "@/lib/account-wallet-state";
 
 function MetricCard({ icon: Icon, label, value, sub, highlight }) {
   return (
@@ -146,36 +151,40 @@ function EmptyAccount() {
   );
 }
 
+const SUPPORTED_CHAIN_IDS = SUPPORTED_CHAINS.map((chain) => chain.id);
+
 export default function AccountPage() {
   const { isConnected: wagmiConnected } = useAccount();
+  const chainId = useChainId();
   const { openConnectModal } = useConnectModal();
-  const [isMockConnected, setIsMockConnected] = useState(false);
-  const [wasDisconnected, setWasDisconnected] = useState(false);
-  const [isNetworkMismatch, setIsNetworkMismatch] = useState(false);
+  const [fixtures, setFixtures] = useState({
+    mockConnected: false,
+    networkMismatch: false,
+    applied: false,
+  });
+  // Local dismissal for fixture-driven mismatch UI (provider mismatch clears
+  // only when the wallet reports a supported chain).
+  const [dismissedFixtureMismatch, setDismissedFixtureMismatch] = useState(false);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get("mockConnected") === "true") {
-        setIsMockConnected(true);
-      }
-      if (params.get("networkMismatch") === "true") {
-        setIsNetworkMismatch(true);
-      }
-    }
+    if (typeof window === "undefined") return;
+    setFixtures(parseAccountTestFixtures(window.location.search));
+  }, []);
 
-    if (!wagmiConnected && !isMockConnected && !isNetworkMismatch) {
-      setWasDisconnected(true);
-    } else {
-      setWasDisconnected(false);
-    }
-  }, [wagmiConnected, isMockConnected, isNetworkMismatch]);
-
-  const isConnected = wagmiConnected || isMockConnected;
+  const walletState = useMemo(() => {
+    const effectiveFixtures = dismissedFixtureMismatch
+      ? { ...fixtures, networkMismatch: false }
+      : fixtures;
+    return resolveAccountWalletState({
+      wagmiConnected,
+      chainId,
+      supportedChainIds: SUPPORTED_CHAIN_IDS,
+      fixtures: effectiveFixtures,
+    });
+  }, [wagmiConnected, chainId, fixtures, dismissedFixtureMismatch]);
 
   const handleRetry = () => {
-    setIsNetworkMismatch(false);
-    setWasDisconnected(false);
+    setDismissedFixtureMismatch(true);
     openConnectModal?.();
   };
 
@@ -187,14 +196,14 @@ export default function AccountPage() {
           Track savings, live yield, and pool activity in one place.
         </p>
       </header>
-      {isConnected ? (
+      {walletState.isConnected ? (
         <ConnectedDashboard
-          isNetworkMismatch={isNetworkMismatch}
+          isNetworkMismatch={walletState.isNetworkMismatch}
           onRetry={handleRetry}
         />
       ) : (
         <>
-          {wasDisconnected && (
+          {walletState.wasDisconnected && (
             <WalletReconnectGuidance
               isDisconnected
               onRetry={handleRetry}
