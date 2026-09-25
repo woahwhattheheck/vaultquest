@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { 
   HelpCircle, 
   X, 
@@ -15,6 +15,9 @@ import {
   AlertCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import {
+  connectedPublicKey,
+} from "@vaultquest/stellar-wallet-connect/src/core/store";
 
 const FAQ_CATEGORIES = [
   {
@@ -53,6 +56,9 @@ export default function SupportWidget() {
   const [formData, setFormData] = useState({ name: "", email: "", category: "general", description: "" });
   const [formErrors, setFormErrors] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
+  const [receiptId, setReceiptId] = useState(null);
+  const idempotencyKeyRef = useRef(null);
 
   const toggleWidget = () => {
     setIsOpen(!isOpen);
@@ -83,11 +89,71 @@ export default function SupportWidget() {
     }
 
     setIsSubmitting(true);
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    setIsSubmitting(false);
-    setView("success");
-    setFormData({ name: "", email: "", category: "general", description: "" });
+    setSubmitError(null);
+
+    if (!idempotencyKeyRef.current) {
+      idempotencyKeyRef.current =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `ticket-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    const walletHint =
+      typeof connectedPublicKey?.get === "function"
+        ? connectedPublicKey.get() || ""
+        : "";
+
+    try {
+      const res = await fetch("/api/support/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: formData.name,
+          email: formData.email,
+          category: formData.category,
+          description: formData.description,
+          wallet_address: walletHint || undefined,
+          idempotency_key: idempotencyKeyRef.current,
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      let payload = null;
+      try {
+        payload = await res.json();
+      } catch {
+        payload = null;
+      }
+
+      if (!res.ok) {
+        const message =
+          payload?.error?.message ||
+          (res.status === 429
+            ? "Too many tickets submitted. Please wait and try again."
+            : "Could not submit your ticket. Your draft was kept — try again.");
+        const fieldErrors = payload?.error?.field_errors;
+        if (fieldErrors && typeof fieldErrors === "object") {
+          setFormErrors(fieldErrors);
+        }
+        setSubmitError(message);
+        return;
+      }
+
+      const id = payload?.data?.id;
+      if (!id) {
+        setSubmitError("Ticket was not accepted. Your draft was kept — try again.");
+        return;
+      }
+
+      setReceiptId(id);
+      setView("success");
+      setFormData({ name: "", email: "", category: "general", description: "" });
+      idempotencyKeyRef.current = null;
+    } catch {
+      setSubmitError("Support intake is unreachable. Your draft was kept — try again.");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleInputChange = (e) => {
@@ -315,6 +381,16 @@ export default function SupportWidget() {
                       {formErrors.description && <p className="text-[10px] text-red-400 mt-1 flex items-center gap-1"><AlertCircle size={10} /> {formErrors.description}</p>}
                     </div>
 
+                    {submitError && (
+                      <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300 flex items-start gap-2">
+                        <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                        <div className="space-y-1">
+                          <p>{submitError}</p>
+                          <p className="text-xs text-red-200/80">Your draft is still here — fix the issue and resubmit.</p>
+                        </div>
+                      </div>
+                    )}
+
                     <button
                       type="submit"
                       disabled={isSubmitting}
@@ -343,9 +419,18 @@ export default function SupportWidget() {
                     <p className="text-sm text-vault-muted mt-2">
                       We&apos;ve received your request. Our support team will respond via email within 24 hours.
                     </p>
+                    {receiptId && (
+                      <p className="mt-3 rounded-lg border border-vault-border bg-vault-surface/60 px-3 py-2 font-mono text-xs text-vault-text">
+                        Reference: <span className="text-vault-accent">{receiptId}</span>
+                      </p>
+                    )}
                   </div>
                   <button 
-                    onClick={() => setView("home")}
+                    onClick={() => {
+                      setReceiptId(null);
+                      setSubmitError(null);
+                      setView("home");
+                    }}
                     className="vq-btn-ghost px-6 py-2 mt-4"
                   >
                     Back to Home
