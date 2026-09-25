@@ -155,6 +155,18 @@ describe("LedgerService.cancelAction", () => {
     expect(cancelled.errorDetail).toBe("user closed modal");
   });
 
+  it("is idempotent when already cancelled with USER_CANCELLED", async () => {
+    const created = await svc.createAction(makeIntentInput());
+    const first = await svc.cancelAction(created.id, "USER_CANCELLED", "user cancelled");
+    expect(first.status).toBe("failed");
+    expect(first.errorCode).toBe("USER_CANCELLED");
+
+    const second = await svc.cancelAction(created.id, "USER_CANCELLED", "user cancelled again");
+    expect(second.id).toBe(first.id);
+    expect(second.status).toBe("failed");
+    expect(second.errorCode).toBe("USER_CANCELLED");
+  });
+
   it("rejects cancel on submitted", async () => {
     const created = await svc.createAction(makeIntentInput());
     await svc.attachTxHash(created.id, "tx_1");

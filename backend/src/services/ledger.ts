@@ -185,6 +185,13 @@ export class LedgerService {
     const row = await this.prisma.actionLedger.findUnique({ where: { id } });
     if (!row) throw AppError.notFound(`action ${id} not found`);
 
+    const CANCEL_CODES = new Set(["USER_CANCELLED", "CANCELLED_BY_USER"]);
+
+    // Idempotent cancel: repeating cancel on an already-cancelled row is a no-op success (#121).
+    if (row.status === "failed" && row.errorCode && CANCEL_CODES.has(row.errorCode)) {
+      return row as unknown as ActionRecord;
+    }
+
     if (row.status !== "pending") {
       throw AppError.conflict(
         ERROR_CODES.ILLEGAL_TRANSITION,
