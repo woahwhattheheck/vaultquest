@@ -4,6 +4,30 @@ This document details the operational procedures, metrics, alarm thresholds, and
 
 ---
 
+
+## Startup configuration validation (issue #133)
+
+Before the indexer worker starts, the backend:
+
+1. StrKey-decodes every entry in `INDEXER_CONTRACT_IDS` as a contract (`C…`) ID — rejecting malformed values, account (`G…`) keys, duplicates, and whitespace-only lists.
+2. Requires `SOROBAN_NETWORK_PASSPHRASE` and calls Soroban RPC `getNetwork` against `SOROBAN_RPC_URL`.
+3. Refuses to start (process exit) when the RPC passphrase does not match, or when contract IDs are invalid.
+
+`GET /health/indexer` includes the validated set:
+
+```json
+{
+  "configured": true,
+  "contract_ids": ["C…"],
+  "network": {
+    "passphrase": "Test SDF Network ; September 2015",
+    "protocol_version": "21"
+  }
+}
+```
+
+When the indexer is not configured, `configured` is `false` and `network` is `null`.
+
 ## 1. System Overview
 
 The Event Indexer is a background service that polls the Stellar/Soroban ledger for contract events emitted by VaultQuest pool contracts. These events are parsed and dispatched to the VaultQuest backend via the protected internal reconciliation endpoint (`POST /internal/reconcile`), which resolves transaction statuses in the database.
