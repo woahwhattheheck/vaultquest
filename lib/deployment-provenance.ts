@@ -138,12 +138,8 @@ export const CANONICAL_PROVENANCE: CanonicalProvenance = {
     contractId:
       process.env.NEXT_PUBLIC_DRIP_POOL_CONTRACT_ID ||
       "CA_PLACEHOLDER_DRIP_POOL_CONTRACT_ID",
-    // Override via DEPLOYED_CONTRACT_WASM_HASH / EXPECTED_CONTRACT_WASM_HASH.
-    // Placeholder documents the expected release artifact until a real hash
-    // is pinned in deployment env.
-    expectedWasmHash:
-      process.env.EXPECTED_CONTRACT_WASM_HASH ||
-      "sha256:7f4c9c18d8e3b3e6488d907f1a30f305dbf2d93e25b1f1ac76bca9ef1587d552",
+    // Release hash must be configured; a fabricated default cannot verify code.
+    expectedWasmHash: process.env.EXPECTED_CONTRACT_WASM_HASH || "",
     version: process.env.NEXT_PUBLIC_CONTRACT_VERSION || "v0.1.0",
   },
   protocolParameters: {
@@ -202,10 +198,15 @@ export function evaluateRpcHealth(
     };
   }
 
-  if (
-    probe.networkPassphrase &&
-    probe.networkPassphrase !== provenance.network.passphrase
-  ) {
+  if (!probe.networkPassphrase) {
+    return {
+      ...base,
+      status: "degraded",
+      detail: "RPC response did not include a network passphrase.",
+    };
+  }
+
+  if (probe.networkPassphrase !== provenance.network.passphrase) {
     return {
       ...base,
       status: "degraded",
@@ -255,6 +256,20 @@ export function evaluateIndexerHealth(
       backendStatus: backendStatus || null,
     },
   };
+
+  if (
+    !["healthy", "lagging", "stale", "degraded"].includes(backendStatus) ||
+    probe.syncLag == null ||
+    !Number.isFinite(Number(probe.syncLag)) ||
+    !probe.lastSuccessSyncTime ||
+    !Number.isFinite(Date.parse(probe.lastSuccessSyncTime))
+  ) {
+    return {
+      ...base,
+      status: "degraded",
+      detail: "Indexer health response is incomplete or invalid.",
+    };
+  }
 
   if (lastError || backendStatus === "degraded") {
     return {
@@ -333,11 +348,19 @@ export function verifyContractProvenance(
     },
   };
 
-  if (!actual) {
+  if (!/^[0-9a-f]{64}$/.test(expected)) {
     return {
       ...base,
       status: "degraded",
-      detail: "Observed contract WASM hash is missing; cannot verify provenance.",
+      detail: "Expected release WASM hash is missing or invalid.",
+    };
+  }
+
+  if (!/^[0-9a-f]{64}$/.test(actual)) {
+    return {
+      ...base,
+      status: "degraded",
+      detail: "Observed on-chain WASM hash is missing or invalid.",
     };
   }
 
@@ -357,7 +380,7 @@ export function verifyContractProvenance(
 }
 
 export function detectConfigDrift(
-  runtime: Partial<ProtocolParameters> & { contractId?: string },
+  runtime: (Partial<ProtocolParameters> & { contractId?: string }) | null,
   provenance: CanonicalProvenance = CANONICAL_PROVENANCE,
   now: Date = new Date(),
 ): ConfigDriftReport {
@@ -368,8 +391,17 @@ export function detectConfigDrift(
   (Object.keys(provenance.protocolParameters) as ProtocolParameterKey[]).forEach(
     (key) => {
       const expected = provenance.protocolParameters[key];
-      const actual = runtime[key];
-      if (typeof actual !== "string") return;
+      const actual = runtime?.[key];
+      if (typeof actual !== "string" || !actual.trim()) {
+        drifts.push({
+          parameter: key,
+          expected,
+          actual: "unavailable",
+          severity: "critical",
+          impact: "No independent runtime observation is available.",
+        });
+        return;
+      }
       if (normalizeValue(actual) === normalizeValue(expected)) return;
       drifts.push({
         parameter: key,
@@ -382,7 +414,7 @@ export function detectConfigDrift(
   );
 
   if (
-    typeof runtime.contractId === "string" &&
+    typeof runtime?.contractId === "string" &&
     runtime.contractId &&
     runtime.contractId !== provenance.contract.contractId
   ) {
@@ -392,6 +424,16 @@ export function detectConfigDrift(
       actual: runtime.contractId,
       severity: "critical",
       impact: "UI / indexer may be talking to a different on-chain deployment.",
+    });
+  }
+
+  if (!runtime?.contractId) {
+    drifts.push({
+      parameter: "contractId",
+      expected: provenance.contract.contractId,
+      actual: "unavailable",
+      severity: "critical",
+      impact: "The active contract ID could not be observed.",
     });
   }
 

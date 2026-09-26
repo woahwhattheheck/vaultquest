@@ -34,7 +34,7 @@ curl -s -X POST https://soroban-testnet.stellar.org \
 ```
 
 ### Remediate
-1. Confirm `NEXT_PUBLIC_HORIZON_URL` / `NEXT_PUBLIC_SOROBAN_RPC_URL` point at the intended network (see `env-inventory.md`).
+1. The probe checks both Horizon root and Soroban `getHealth` / `getNetwork` for the intended passphrase. Confirm `NEXT_PUBLIC_HORIZON_URL` / `NEXT_PUBLIC_SOROBAN_RPC_URL` point at the intended network (see `env-inventory.md`).
 2. If rate-limited (HTTP 429), switch to a dedicated RPC provider or raise poll interval.
 3. If passphrase mismatches, stop using the endpoint — it is the wrong network.
 
@@ -43,16 +43,16 @@ curl -s -X POST https://soroban-testnet.stellar.org \
 ## 2. Contract WASM provenance
 
 ### Symptoms
-- **Degraded:** observed `DEPLOYED_CONTRACT_WASM_HASH` ≠ canonical `EXPECTED_CONTRACT_WASM_HASH`.
-- Missing observed hash is also treated as degraded (cannot verify).
+- **Degraded:** the on-chain contract instance WASM hash differs from `EXPECTED_CONTRACT_WASM_HASH`.
+- Missing or invalid expected release hash, invalid contract ID, missing instance, or failed RPC lookup is also degraded.
 
 ### Diagnose
 1. Compare the admin panel “Smart contract WASM hash” metadata (`expectedHash` vs `actualHash`).
 2. Confirm the drip-pool contract id in `NEXT_PUBLIC_DRIP_POOL_CONTRACT_ID`.
-3. Re-derive the release WASM hash from the tagged build artifact.
+3. The admin probe reads the contract instance through Soroban `getLedgerEntries` and decodes its executable hash. Re-derive the expected release WASM hash from the tagged build artifact.
 
 ### Remediate
-1. If an upgrade completed, update `EXPECTED_CONTRACT_WASM_HASH` / `DEPLOYED_CONTRACT_WASM_HASH` to the new release hash and redeploy the frontend.
+1. If an approved upgrade completed, update `EXPECTED_CONTRACT_WASM_HASH` to the new release hash and redeploy the frontend. Never copy the observed hash into the expected setting before verifying the release.
 2. If the on-chain hash changed without a governance proposal, pause admin writes and open an incident — treat as possible substitution.
 3. Cross-check proxy `last_provenance` on-chain against the published release notes.
 
@@ -62,16 +62,16 @@ curl -s -X POST https://soroban-testnet.stellar.org \
 
 ### Symptoms
 - **Stale:** non-critical parameters (round duration, deposit caps) differ from canonical provenance.
-- **Degraded:** critical parameters (`treasuryFee`, `settlementQuorum`, `emergencyPauseThreshold`) or `contractId` differ.
+- **Degraded:** critical parameters (`treasuryFee`, `settlementQuorum`, `emergencyPauseThreshold`) or `contractId` differ, or the independent observation is missing, incomplete, or older than five minutes.
 
 ### Diagnose
 1. Open the Config drift panel on `/app/admin/settings`.
-2. For each drifted key, compare **expected** (canonical) vs **actual** (runtime / env override).
+2. For each drifted key, compare **expected** (canonical) vs **actual** from `ADMIN_RUNTIME_CONFIG_URL`. The endpoint must return a fresh `observedAt`, active `contractId`, and every protocol parameter, sourced independently from the release baseline. If it is unavailable, the panel reports degraded instead of assuming a match.
 
 ### Remediate
 1. Prefer restoring runtime values to the published release via a governance proposal (`/app/admin/proposals`).
 2. If the drift is intentional, update canonical provenance in `lib/deployment-provenance.ts` (and release notes) in the same change set.
-3. Use `ADMIN_RUNTIME_PROTOCOL_PARAMETERS` only as a temporary observed-state override for the health probe — not as a permanent source of truth.
+3. Restore the independent observation endpoint if it is stale or unavailable. A static environment value cannot prove current on-chain/runtime state.
 
 ---
 

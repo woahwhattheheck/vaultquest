@@ -6,60 +6,59 @@ import {
   evaluateIndexerHealth,
   evaluateRpcHealth,
   verifyContractProvenance,
+  worstHealth,
 } from "@/lib/deployment-provenance";
+import {
+  contractInstanceLedgerKey,
+  wasmHashFromContractInstance,
+} from "@vaultquest/stellar-wallet-connect/admin-provenance";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
 const PROBE_TIMEOUT_MS = 6000;
+const CONFIG_MAX_AGE_MS = 5 * 60 * 1000;
 
 /**
- * Live admin dependency health (#177).
- * Probes Horizon RPC, backend indexer, contract WASM hash, and config drift.
- * Probe failures become degraded — never silent "healthy" fallbacks.
+ * Each dependency is observed independently. Missing or invalid observations
+ * are degraded; an expected release value can never stand in for a live value.
  */
 export async function GET() {
   const provenance = CANONICAL_PROVENANCE;
   const now = new Date();
+  const [horizonProbe, sorobanProbe, indexerProbe, observedWasmHash, runtimeConfig] =
+    await Promise.all([
+      probeHorizon(provenance.network.horizonUrl),
+      probeSoroban(provenance.network.sorobanRpcUrl),
+      probeIndexer(),
+      probeContractHash(
+        provenance.network.sorobanRpcUrl,
+        provenance.contract.contractId,
+      ),
+      probeRuntimeConfig(now),
+    ]);
 
-  const rpcProbe = await probeHorizon(provenance.network.horizonUrl);
-  const rpc = evaluateRpcHealth(
-    { ...rpcProbe, endpoint: provenance.network.horizonUrl },
+  const horizon = evaluateRpcHealth(
+    { ...horizonProbe, endpoint: provenance.network.horizonUrl },
     provenance,
     now,
   );
-
-  const indexerProbe = await probeIndexer();
-  const indexer = evaluateIndexerHealth(indexerProbe, provenance, now);
-
-  const observedWasmHash =
-    process.env.DEPLOYED_CONTRACT_WASM_HASH ||
-    process.env.EXPECTED_CONTRACT_WASM_HASH ||
-    provenance.contract.expectedWasmHash;
-  const contract = verifyContractProvenance(
-    observedWasmHash,
+  const soroban = evaluateRpcHealth(
+    { ...sorobanProbe, endpoint: provenance.network.sorobanRpcUrl },
     provenance,
     now,
   );
-
-  const runtimeConfig = {
-    ...provenance.protocolParameters,
-    contractId:
-      process.env.NEXT_PUBLIC_DRIP_POOL_CONTRACT_ID ||
-      provenance.contract.contractId,
+  const rpc = {
+    ...horizon,
+    status: worstHealth(horizon.status, soroban.status),
+    detail: "Horizon: " + horizon.detail + " Soroban: " + soroban.detail,
+    latencyMs: Math.max(horizon.latencyMs || 0, soroban.latencyMs || 0),
+    metadata: { horizon: horizon.metadata, soroban: soroban.metadata },
   };
-  // Optional overrides let ops inject observed runtime values without
-  // rebuilding the UI (JSON object of protocol parameter strings).
-  const overrideRaw = process.env.ADMIN_RUNTIME_PROTOCOL_PARAMETERS;
-  if (overrideRaw) {
-    try {
-      Object.assign(runtimeConfig, JSON.parse(overrideRaw));
-    } catch {
-      // Ignore malformed override; drift detection still runs on defaults.
-    }
-  }
-
+  const indexer = evaluateIndexerHealth(indexerProbe, provenance, now);
+  const contract = verifyContractProvenance(observedWasmHash, provenance, now);
   const configDrift = detectConfigDrift(runtimeConfig, provenance, now);
   const overview = aggregateAdminHealth({
     rpc,
@@ -69,90 +68,137 @@ export async function GET() {
     checkedAt: now.toISOString(),
   });
 
-  const httpStatus = overview.status === "degraded" ? 503 : 200;
   return NextResponse.json(overview, {
-    status: httpStatus,
+    status: overview.status === "degraded" ? 503 : 200,
     headers: { "Cache-Control": "no-store" },
   });
 }
 
-async function probeHorizon(horizonUrl) {
+async function fetchJson(url, options = {}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-  const started = Date.now();
-
   try {
-    const response = await fetch(horizonUrl, {
-      method: "GET",
-      headers: { accept: "application/json" },
+    const response = await fetch(url, {
+      ...options,
       signal: controller.signal,
       cache: "no-store",
     });
-    const latencyMs = Date.now() - started;
-    if (!response.ok) {
-      return {
-        ok: false,
-        latencyMs,
-        error: `Horizon returned HTTP ${response.status}`,
-      };
-    }
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      return {
-        ok: false,
-        latencyMs,
-        error: "Horizon returned a non-JSON body",
-      };
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function postSoroban(rpcUrl, method, params = {}) {
+  const data = await fetchJson(rpcUrl, {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  if (data?.error || !data?.result) {
+    throw new Error(data?.error?.message || "Invalid " + method + " RPC response");
+  }
+  return data.result;
+}
+
+async function probeSoroban(rpcUrl) {
+  const started = Date.now();
+  try {
+    const [health, network] = await Promise.all([
+      postSoroban(rpcUrl, "getHealth"),
+      postSoroban(rpcUrl, "getNetwork"),
+    ]);
+    if (health.status !== "healthy" || !network.passphrase) {
+      throw new Error("Soroban RPC unhealthy or missing network passphrase");
     }
     return {
       ok: true,
-      latencyMs,
+      latencyMs: Date.now() - started,
+      networkPassphrase: network.passphrase,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - started,
+      error: error instanceof Error ? error.message : "Soroban RPC failed",
+    };
+  }
+}
+
+async function probeContractHash(rpcUrl, contractId) {
+  try {
+    const key = contractInstanceLedgerKey(contractId);
+    const result = await postSoroban(rpcUrl, "getLedgerEntries", { keys: [key] });
+    const entryXdr = result.entries?.[0]?.xdr;
+    return typeof entryXdr === "string"
+      ? wasmHashFromContractInstance(entryXdr)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function probeRuntimeConfig(now) {
+  // This endpoint must expose observed runtime/on-chain values independently
+  // of this route's canonical release baseline.
+  const url = process.env.ADMIN_RUNTIME_CONFIG_URL;
+  if (!url) return null;
+  try {
+    const payload = await fetchJson(url, {
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    const data = payload?.data ?? payload;
+    const observedAt = Date.parse(data?.observedAt ?? "");
+    if (
+      !Number.isFinite(observedAt) ||
+      observedAt > now.getTime() + 60_000 ||
+      now.getTime() - observedAt > CONFIG_MAX_AGE_MS
+    ) {
+      return null;
+    }
+    if (!data?.protocolParameters || typeof data.protocolParameters !== "object") {
+      return null;
+    }
+    return { ...data.protocolParameters, contractId: data.contractId };
+  } catch {
+    return null;
+  }
+}
+
+async function probeHorizon(horizonUrl) {
+  const started = Date.now();
+  try {
+    const data = await fetchJson(horizonUrl, {
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    return {
+      ok: true,
+      latencyMs: Date.now() - started,
       networkPassphrase: data?.network_passphrase ?? null,
     };
   } catch (error) {
     return {
       ok: false,
       latencyMs: Date.now() - started,
-      error:
-        error?.name === "AbortError"
-          ? "Horizon probe timed out"
-          : error instanceof Error
-            ? error.message
-            : "Horizon probe failed",
+      error: error instanceof Error ? error.message : "Horizon probe failed",
     };
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
 async function probeIndexer() {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-
   try {
-    const response = await fetch(`${BACKEND_URL}/health/indexer`, {
+    const payload = await fetchJson(BACKEND_URL + "/health/indexer", {
       method: "GET",
       headers: { accept: "application/json" },
-      signal: controller.signal,
-      cache: "no-store",
     });
-    if (!response.ok) {
-      return {
-        status: "degraded",
-        latestLedger: 0,
-        syncLag: 0,
-        lastError: `Indexer health unreachable (HTTP ${response.status})`,
-        message: `Indexer health unreachable (HTTP ${response.status})`,
-      };
-    }
-    const payload = await response.json();
     const data = payload?.data ?? payload;
     return {
       status: data?.status ?? null,
-      latestLedger: data?.latest_ledger ?? 0,
-      syncLag: data?.sync_lag ?? 0,
+      latestLedger: data?.latest_ledger ?? null,
+      syncLag: data?.sync_lag ?? null,
       lastSyncTime: data?.last_sync_time ?? null,
       lastSuccessSyncTime: data?.last_success_sync_time ?? null,
       lastError: data?.last_error ?? null,
@@ -160,19 +206,7 @@ async function probeIndexer() {
     };
   } catch (error) {
     const message =
-      error?.name === "AbortError"
-        ? "Indexer health probe timed out"
-        : error instanceof Error
-          ? error.message
-          : "Indexer health probe failed";
-    return {
-      status: "degraded",
-      latestLedger: 0,
-      syncLag: 0,
-      lastError: message,
-      message,
-    };
-  } finally {
-    clearTimeout(timeoutId);
+      error instanceof Error ? error.message : "Indexer health probe failed";
+    return { status: "degraded", lastError: message, message };
   }
 }

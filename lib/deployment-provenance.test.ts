@@ -161,6 +161,17 @@ describe("verifyContractProvenance", () => {
     ).toBe("healthy");
   });
 
+  it("requires an independently observed and configured hash", () => {
+    const noExpected = {
+      ...baseProvenance,
+      contract: { ...baseProvenance.contract, expectedWasmHash: "" },
+    };
+    expect(verifyContractProvenance(null, noExpected, NOW).status).toBe("degraded");
+    expect(
+      verifyContractProvenance(baseProvenance.contract.expectedWasmHash, noExpected, NOW).status,
+    ).toBe("degraded");
+  });
+
   it("marks missing or mismatched hashes as degraded", () => {
     expect(verifyContractProvenance(null, baseProvenance, NOW).status).toBe(
       "degraded",
@@ -189,11 +200,25 @@ describe("detectConfigDrift", () => {
     expect(report.hasDrift).toBe(false);
   });
 
+  it("degrades missing runtime observations instead of echoing expected values", () => {
+    const missing = detectConfigDrift(null, baseProvenance, NOW);
+    expect(missing.status).toBe("degraded");
+    expect(missing.drifts.some((d) => d.actual === "unavailable")).toBe(true);
+
+    const partial = detectConfigDrift(
+      { treasuryFee: baseProvenance.protocolParameters.treasuryFee },
+      baseProvenance,
+      NOW,
+    );
+    expect(partial.status).toBe("degraded");
+  });
+
   it("marks non-critical drift as stale and critical drift as degraded", () => {
     const warning = detectConfigDrift(
       {
         ...baseProvenance.protocolParameters,
         roundDuration: "14 days",
+        contractId: baseProvenance.contract.contractId,
       },
       baseProvenance,
       NOW,
@@ -237,7 +262,7 @@ describe("aggregateAdminHealth", () => {
       NOW,
     );
     const configDrift = detectConfigDrift(
-      baseProvenance.protocolParameters,
+      { ...baseProvenance.protocolParameters, contractId: baseProvenance.contract.contractId },
       baseProvenance,
       NOW,
     );
@@ -287,7 +312,7 @@ describe("aggregateAdminHealth", () => {
         NOW,
       ),
       configDrift: detectConfigDrift(
-        baseProvenance.protocolParameters,
+        { ...baseProvenance.protocolParameters, contractId: baseProvenance.contract.contractId },
         baseProvenance,
         NOW,
       ),
