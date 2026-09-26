@@ -206,4 +206,28 @@ describe("AdminSettingsPage live health", () => {
     });
     expect(global.fetch).toHaveBeenCalled();
   });
+
+  it("does not retain a healthy result after a failed refresh", async () => {
+    mockHealth(HEALTHY_PAYLOAD);
+    const user = userEvent.setup();
+    render(<AdminSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("health-dep-rpc")).toHaveAttribute(
+        "data-status",
+        "healthy",
+      );
+    });
+
+    global.fetch = vi.fn().mockRejectedValue(new Error("Health probe failed"));
+    await user.click(screen.getByLabelText("Refresh health"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("Health probe failed");
+    });
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
+    expect(screen.getAllByText("Degraded").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Healthy")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("health-dep-rpc")).not.toBeInTheDocument();
+  });
 });

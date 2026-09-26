@@ -205,6 +205,7 @@ export default function AdminSettingsPage() {
       }
       setHealth(payload);
     } catch (err) {
+      setHealth(null);
       setError(err instanceof Error ? err.message : "Unable to load live dependency health");
     } finally {
       setLoading(false);
@@ -220,7 +221,7 @@ export default function AdminSettingsPage() {
   const dependencies = health?.dependencies ?? [];
   const healthyCount = health?.summary?.healthy ?? 0;
   const totalDeps = health?.summary?.total ?? dependencies.length;
-  const overallStatus = health?.status ?? (error ? "degraded" : "healthy");
+  const overallStatus = error ? "degraded" : health?.status;
   const drift = health?.configDrift;
 
   const totals = {
@@ -283,7 +284,7 @@ export default function AdminSettingsPage() {
         />
         <MetricCard
           label="Live health"
-          value={loading && !health ? "…" : `${healthyCount}/${totals.services}`}
+          value={error ? "Unavailable" : loading && !health ? "…" : `${healthyCount}/${totals.services}`}
           detail="Dependencies currently reporting healthy."
           icon={Server}
         />
@@ -304,11 +305,15 @@ export default function AdminSettingsPage() {
             </p>
             <p className="mt-2 text-xs text-vault-muted">
               Last checked: {formatCheckedAt(health?.checkedAt)} · Overall{" "}
-              <span className="font-medium text-vault-text">{HEALTH_LABEL[overallStatus] ?? overallStatus}</span>
+              <span className="font-medium text-vault-text">{HEALTH_LABEL[overallStatus] ?? "Checking"}</span>
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <HealthBadge status={overallStatus} />
+            {overallStatus ? (
+              <HealthBadge status={overallStatus} />
+            ) : (
+              <span className="text-sm text-vault-muted">Checking</span>
+            )}
             <button
               type="button"
               onClick={loadHealth}
