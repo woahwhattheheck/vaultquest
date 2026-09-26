@@ -173,6 +173,46 @@ describe("JobLeaseService.runWithLease", () => {
     if (overlap.status === "skipped") expect(overlap.reason).toBe("local_overlap");
   });
 
+  it("guards pending acquisition and releases it if shutdown wins", async () => {
+    let completeAcquire!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      completeAcquire = resolve;
+    });
+    const store = new (class extends InMemoryJobLeaseStore {
+      calls = 0;
+
+      override async tryAcquire(jobName: string, ownerId: string, ttlMs: number, now?: Date) {
+        this.calls += 1;
+        await gate;
+        return super.tryAcquire(jobName, ownerId, ttlMs, now);
+      }
+    })();
+    const svc = new JobLeaseService({
+      logger,
+      store,
+      ownerId: "solo",
+      heartbeatMs: 60_000
+    });
+
+    let ran = 0;
+    const pending = svc.runWithLease("cron:pending", async () => {
+      ran += 1;
+      return true;
+    });
+    const overlap = await svc.runWithLease("cron:pending", async () => {
+      ran += 1;
+      return false;
+    });
+    expect(overlap).toEqual({ status: "skipped", reason: "local_overlap" });
+    expect(store.calls).toBe(1);
+
+    await svc.shutdown();
+    completeAcquire();
+    expect(await pending).toEqual({ status: "skipped", reason: "shutting_down" });
+    expect(ran).toBe(0);
+    expect(store.peek("cron:pending")?.ownerId).toBe("");
+  });
+
   it("marks fence_lost when another owner steals after expiry mid-run", async () => {
     const store = new InMemoryJobLeaseStore();
     const clock = makeClock(Date.parse("2026-09-25T00:00:00.000Z"));
