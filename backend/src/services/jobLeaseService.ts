@@ -264,8 +264,11 @@ export class PrismaJobLeaseStore implements JobLeaseStore {
   }
 
   async release(jobName: string, ownerId: string, fenceToken: bigint): Promise<boolean> {
-    const result = await this.prisma.jobLease.deleteMany({
-      where: { jobName, ownerId, fenceToken }
+    // Keep the row so the next acquisition increments the existing fence token.
+    // Deleting it would reset the token to 1 after every successful run.
+    const result = await this.prisma.jobLease.updateMany({
+      where: { jobName, ownerId, fenceToken },
+      data: { ownerId: "", expiresAt: new Date(0) }
     });
     return result.count === 1;
   }
@@ -322,7 +325,8 @@ export class InMemoryJobLeaseStore implements JobLeaseStore {
     const existing = this.leases.get(jobName);
     if (!existing) return false;
     if (existing.ownerId !== ownerId || existing.fenceToken !== fenceToken) return false;
-    this.leases.delete(jobName);
+    existing.ownerId = "";
+    existing.expiresAt = 0;
     return true;
   }
 
