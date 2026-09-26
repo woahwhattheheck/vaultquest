@@ -42,6 +42,22 @@ describe("InMemoryJobLeaseStore", () => {
     }
   });
 
+  it("keeps the fence monotonic after a normal release", async () => {
+    const store = new InMemoryJobLeaseStore();
+    const now = new Date("2026-09-25T00:00:00.000Z");
+    const first = await store.tryAcquire("job-a", "owner-1", 5_000, now);
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+
+    expect(await store.release("job-a", "owner-1", first.fenceToken)).toBe(true);
+    const second = await store.tryAcquire("job-a", "owner-2", 5_000, now);
+    expect(second.acquired).toBe(true);
+    if (!second.acquired) return;
+
+    expect(second.fenceToken).toBe(first.fenceToken + BigInt(1));
+    expect(await store.release("job-a", "owner-1", first.fenceToken)).toBe(false);
+  });
+
   it("rejects renew and release from a stale fence", async () => {
     const store = new InMemoryJobLeaseStore();
     const t0 = new Date("2026-09-25T00:00:00.000Z");
