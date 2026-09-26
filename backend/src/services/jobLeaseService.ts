@@ -58,6 +58,7 @@ export class JobLeaseService {
     string,
     { fenceToken: bigint; heartbeat: NodeJS.Timeout; abort: AbortController }
   >();
+  private readonly acquiring = new Set<string>();
   private shuttingDown = false;
 
   constructor(opts: JobLeaseServiceOptions) {
@@ -83,18 +84,35 @@ export class JobLeaseService {
     if (this.shuttingDown) {
       return { status: "skipped", reason: "shutting_down" };
     }
-    if (this.active.has(jobName)) {
+    if (this.active.has(jobName) || this.acquiring.has(jobName)) {
       this.logger.info({ jobName }, "job lease skipped: local overlap");
       return { status: "skipped", reason: "local_overlap" };
     }
 
-    const acquisition = await this.store.tryAcquire(jobName, this.ownerId, this.ttlMs, this.now());
+    this.acquiring.add(jobName);
+    let acquisition: LeaseAcquisition;
+    try {
+      acquisition = await this.store.tryAcquire(jobName, this.ownerId, this.ttlMs, this.now());
+    } finally {
+      this.acquiring.delete(jobName);
+    }
     if (!acquisition.acquired) {
       this.logger.info(
         { jobName, reason: acquisition.reason, holder: acquisition.holder },
         "job lease skipped: not acquired"
       );
       return { status: "skipped", reason: acquisition.reason };
+    }
+
+    // Shutdown may complete while the store call is pending. Release a late
+    // acquisition without starting any work or heartbeat.
+    if (this.shuttingDown) {
+      try {
+        await this.store.release(jobName, this.ownerId, acquisition.fenceToken);
+      } catch (err) {
+        this.logger.warn({ err, jobName }, "job lease release after shutdown failed");
+      }
+      return { status: "skipped", reason: "shutting_down" };
     }
 
     const abort = new AbortController();
