@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import VaultRetryQueue from "./VaultRetryQueue";
 import { connectedPublicKey } from "@vaultquest/stellar-wallet-connect/src/core/store";
+import { createRetryQueueClient } from "@/lib/retry-queue-client";
 
 const WALLET = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 const WALLET_B = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF";
@@ -147,4 +148,86 @@ describe("VaultRetryQueue", () => {
       parentActionId: "act-001",
     });
   });
+
+  it.each(["retry", "cancel"])(
+    "allows the first %s through the real client while blocking duplicate clicks",
+    async (operation) => {
+      const original = {
+        id: "act-001",
+        wallet_address: WALLET,
+        action_type: "deposit",
+        action_payload: { vault_id: "v1", amount: "500", token: "USDC" },
+        status: operation === "retry" ? "failed" : "pending",
+        error_code: operation === "retry" ? "WALLET_REJECTED" : null,
+        retry_count: 0,
+        created_at: "2026-09-24T12:00:00.000Z",
+      };
+      let releaseFresh;
+      const freshReady = new Promise((resolve) => {
+        releaseFresh = resolve;
+      });
+      // Exercise the production client and policy; only the ledger transport
+      // is controlled so a second click can race the authoritative read.
+      const fetchImpl = vi.fn(async (url, init = {}) => {
+        const requestPath = new URL(url).pathname;
+        let data;
+        if (init.method === "POST") {
+          data = operation === "retry"
+            ? {
+                ...original,
+                id: "act-retry",
+                status: "pending",
+                error_code: null,
+                action_payload: JSON.parse(init.body).action_payload,
+              }
+            : { ...original, status: "failed", error_code: "USER_CANCELLED" };
+        } else if (requestPath === "/actions/act-001") {
+          await freshReady;
+          data = original;
+        } else {
+          data = [original];
+        }
+        return new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+      const client = createRetryQueueClient({
+        baseUrl: "http://ledger.test",
+        fetchImpl,
+        getAuthHeaders: () => ({ "X-Wallet-Address": WALLET }),
+      });
+      render(<VaultRetryQueue walletAddress={WALLET} client={client} />);
+      const button = await screen.findByRole("button", {
+        name: operation === "retry" ? "Retry deposit" : "Cancel pending action",
+      });
+
+      fireEvent.click(button);
+      fireEvent.click(button);
+      await waitFor(() => {
+        expect(fetchImpl.mock.calls.filter(([url]) =>
+          new URL(url).pathname === "/actions/act-001",
+        )).toHaveLength(1);
+      });
+      expect(button).toBeDisabled();
+      releaseFresh();
+
+      const writes = () => fetchImpl.mock.calls.filter(([, init]) => init.method === "POST");
+      await waitFor(() => expect(writes()).toHaveLength(1));
+      const [url, init] = writes()[0];
+      expect(init.headers["X-Wallet-Address"]).toBe(WALLET);
+      if (operation === "retry") {
+        expect(new URL(url).pathname).toBe("/actions");
+        expect(JSON.parse(init.body).action_payload).toMatchObject({
+          parent_action_id: original.id,
+          retry_of: original.id,
+        });
+        await waitFor(() => expect(document.querySelector('[data-action-id="act-retry"]')).not.toBeNull());
+      } else {
+        expect(new URL(url).pathname).toBe("/actions/act-001/cancel");
+        expect(JSON.parse(init.body).error_code).toBe("USER_CANCELLED");
+        await waitFor(() => expect(screen.queryByRole("region", { name: "Transaction retry queue" })).toBeNull());
+      }
+    },
+  );
 });

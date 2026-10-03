@@ -252,7 +252,6 @@ export default function VaultRetryQueue({
         const { action: created } = await client.createRetryAttempt(action, {
           walletAddress,
           freshAction: fresh,
-          inFlightIds: inFlightRef.current,
           requestSign,
         });
 
@@ -289,7 +288,6 @@ export default function VaultRetryQueue({
       try {
         await client.cancelAction(action, {
           walletAddress,
-          inFlightIds: inFlightRef.current,
         });
         dismissedRef.current.add(action.id);
         setActions((prev) => prev.filter((a) => a.id !== action.id));
