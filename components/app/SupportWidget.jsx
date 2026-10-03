@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import React, { useState, useRef } from "react";
 import { 
   HelpCircle, 
   X, 
@@ -49,6 +49,12 @@ const FAQ_CATEGORIES = [
   }
 ];
 
+function currentWalletHint() {
+  return typeof connectedPublicKey?.get === "function"
+    ? connectedPublicKey.get() || ""
+    : "";
+}
+
 export default function SupportWidget() {
   const [isOpen, setIsOpen] = useState(false);
   const [view, setView] = useState("home"); // home, faq-list, faq-detail, ticket, success
@@ -58,14 +64,23 @@ export default function SupportWidget() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const [receiptId, setReceiptId] = useState(null);
-  const idempotencyKeyRef = useRef(null);
+  const [receiptNotice, setReceiptNotice] = useState(null);
+  const retryRef = useRef(null);
+  const submittingRef = useRef(false);
+  const formRevisionRef = useRef(0);
 
   const toggleWidget = () => {
+    formRevisionRef.current += 1;
     setIsOpen(!isOpen);
     if (!isOpen) {
       setView("home");
       setFormErrors({});
     }
+  };
+
+  const showView = (nextView) => {
+    formRevisionRef.current += 1;
+    setView(nextView);
   };
 
   const validateForm = () => {
@@ -82,38 +97,50 @@ export default function SupportWidget() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (submittingRef.current) return;
     const errors = validateForm();
     if (Object.keys(errors).length > 0) {
       setFormErrors(errors);
       return;
     }
 
+    const walletHint = currentWalletHint();
+    const ticketPayload = {
+      name: formData.name,
+      email: formData.email,
+      category: formData.category,
+      description: formData.description,
+      wallet_address: walletHint || undefined,
+    };
+    const payloadIdentity = JSON.stringify(ticketPayload);
+    const revision = formRevisionRef.current;
+    const ownsDraft = () =>
+      revision === formRevisionRef.current && walletHint === currentWalletHint();
+
+    submittingRef.current = true;
     setIsSubmitting(true);
     setSubmitError(null);
-
-    if (!idempotencyKeyRef.current) {
-      idempotencyKeyRef.current =
-        typeof crypto !== "undefined" && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `ticket-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    }
-
-    const walletHint =
-      typeof connectedPublicKey?.get === "function"
-        ? connectedPublicKey.get() || ""
-        : "";
+    setFormErrors({});
+    setReceiptNotice((notice) => notice ? "earlier" : null);
 
     try {
+      // An uncertain retry keeps its key only for the same submitted content.
+      // Comparing at submit time also preserves the key after edits are undone.
+      if (retryRef.current?.payloadIdentity !== payloadIdentity) {
+        retryRef.current = {
+          payloadIdentity,
+          key: typeof crypto !== "undefined" && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `ticket-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        };
+      }
+
       const res = await fetch("/api/support/tickets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: formData.name,
-          email: formData.email,
-          category: formData.category,
-          description: formData.description,
-          wallet_address: walletHint || undefined,
-          idempotency_key: idempotencyKeyRef.current,
+          ...ticketPayload,
+          idempotency_key: retryRef.current.key,
         }),
         signal: AbortSignal.timeout(10000),
       });
@@ -126,6 +153,7 @@ export default function SupportWidget() {
       }
 
       if (!res.ok) {
+        if (!ownsDraft()) return;
         const message =
           payload?.error?.message ||
           (res.status === 429
@@ -141,23 +169,43 @@ export default function SupportWidget() {
 
       const id = payload?.data?.id;
       if (!id) {
-        setSubmitError("Ticket was not accepted. Your draft was kept — try again.");
+        if (ownsDraft()) {
+          setSubmitError("Could not confirm ticket acceptance. Your draft was kept — try again.");
+        }
         return;
       }
 
       setReceiptId(id);
+      if (!ownsDraft()) {
+        setReceiptNotice("earlier");
+        return;
+      }
+      // The intake also deduplicates similar content without comparing every
+      // field. A matching receipt cannot confirm that all current edits saved.
+      if (payload.data.duplicate) {
+        setReceiptNotice("duplicate");
+        return;
+      }
+      setReceiptNotice(null);
       setView("success");
       setFormData({ name: "", email: "", category: "general", description: "" });
-      idempotencyKeyRef.current = null;
+      retryRef.current = null;
     } catch {
-      setSubmitError("Support intake is unreachable. Your draft was kept — try again.");
+      if (ownsDraft()) {
+        setSubmitError("Support intake is unreachable. Your draft was kept — try again.");
+      }
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
     }
   };
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
+    if (formData[name] !== value) {
+      formRevisionRef.current += 1;
+      setReceiptNotice((notice) => notice ? "earlier" : null);
+    }
     setFormData(prev => ({ ...prev, [name]: value }));
     if (formErrors[name]) {
       setFormErrors(prev => ({ ...prev, [name]: null }));
@@ -199,6 +247,15 @@ export default function SupportWidget() {
 
             {/* Content Area */}
             <div className="max-h-[500px] overflow-y-auto p-4">
+              {receiptNotice && receiptId && (
+                <div role="status" className="mb-4 space-y-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-vault-text">
+                  <p>{receiptNotice === "earlier"
+                    ? "An earlier ticket was received."
+                    : "A matching ticket was already received."}</p>
+                  <p className="font-mono text-xs">Reference: {receiptId}</p>
+                  <p className="text-xs text-vault-muted">Your draft has been kept. Review it before resubmitting.</p>
+                </div>
+              )}
               {view === "home" && (
                 <div className="space-y-4">
                   <div className="rounded-xl bg-vault-accent/10 p-4 border border-vault-accent/20">
@@ -209,7 +266,7 @@ export default function SupportWidget() {
 
                   <div className="grid gap-3">
                     <button 
-                      onClick={() => setView("faq-list")}
+                      onClick={() => showView("faq-list")}
                       className="flex items-center justify-between rounded-xl border border-vault-border bg-vault-surface/50 p-4 text-left transition-all hover:border-vault-accent/50 hover:bg-vault-accent/5"
                     >
                       <div className="flex items-center gap-3">
@@ -223,7 +280,7 @@ export default function SupportWidget() {
                     </button>
 
                     <button 
-                      onClick={() => setView("ticket")}
+                      onClick={() => showView("ticket")}
                       className="flex items-center justify-between rounded-xl border border-vault-border bg-vault-surface/50 p-4 text-left transition-all hover:border-vault-accent/50 hover:bg-vault-accent/5"
                     >
                       <div className="flex items-center gap-3">
@@ -252,7 +309,7 @@ export default function SupportWidget() {
               {view === "faq-list" && (
                 <div className="space-y-3">
                   <button 
-                    onClick={() => setView("home")}
+                    onClick={() => showView("home")}
                     className="flex items-center gap-2 text-sm text-vault-muted hover:text-vault-text transition-colors mb-4"
                   >
                     <ArrowLeft size={16} /> Back to home
@@ -264,7 +321,7 @@ export default function SupportWidget() {
                         key={cat.id}
                         onClick={() => {
                           setSelectedCategory(cat);
-                          setView("faq-detail");
+                          showView("faq-detail");
                         }}
                         className="flex items-center gap-3 rounded-xl border border-vault-border bg-vault-surface/50 p-4 text-left transition-all hover:border-vault-accent/50 hover:bg-vault-accent/5"
                       >
@@ -285,7 +342,7 @@ export default function SupportWidget() {
               {view === "faq-detail" && selectedCategory && (
                 <div className="space-y-4">
                   <button 
-                    onClick={() => setView("faq-list")}
+                    onClick={() => showView("faq-list")}
                     className="flex items-center gap-2 text-sm text-vault-muted hover:text-vault-text transition-colors mb-4"
                   >
                     <ArrowLeft size={16} /> All categories
@@ -308,7 +365,7 @@ export default function SupportWidget() {
                   <div className="mt-8 rounded-xl bg-vault-surface p-4 text-center border border-vault-border">
                     <p className="text-sm text-vault-muted mb-3">Didn&apos;t find what you need?</p>
                     <button 
-                      onClick={() => setView("ticket")}
+                      onClick={() => showView("ticket")}
                       className="vq-btn-primary w-full py-2"
                     >
                       Contact Support
@@ -320,7 +377,7 @@ export default function SupportWidget() {
               {view === "ticket" && (
                 <div className="space-y-4">
                   <button 
-                    onClick={() => setView("home")}
+                    onClick={() => showView("home")}
                     className="flex items-center gap-2 text-sm text-vault-muted hover:text-vault-text transition-colors mb-4"
                   >
                     <ArrowLeft size={16} /> Back
@@ -328,8 +385,9 @@ export default function SupportWidget() {
                   <h4 className="text-lg font-semibold text-vault-text">Submit a support ticket</h4>
                   <form onSubmit={handleSubmit} className="space-y-4">
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-vault-muted px-1">Full Name</label>
+                      <label htmlFor="support-name" className="text-xs font-medium text-vault-muted px-1">Full Name</label>
                       <input
+                        id="support-name"
                         type="text"
                         name="name"
                         value={formData.name}
@@ -341,8 +399,9 @@ export default function SupportWidget() {
                     </div>
 
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-vault-muted px-1">Email Address</label>
+                      <label htmlFor="support-email" className="text-xs font-medium text-vault-muted px-1">Email Address</label>
                       <input
+                        id="support-email"
                         type="email"
                         name="email"
                         value={formData.email}
@@ -354,8 +413,9 @@ export default function SupportWidget() {
                     </div>
 
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-vault-muted px-1">Category</label>
+                      <label htmlFor="support-category" className="text-xs font-medium text-vault-muted px-1">Category</label>
                       <select
+                        id="support-category"
                         name="category"
                         value={formData.category}
                         onChange={handleInputChange}
@@ -369,8 +429,9 @@ export default function SupportWidget() {
                     </div>
 
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-vault-muted px-1">Description</label>
+                      <label htmlFor="support-description" className="text-xs font-medium text-vault-muted px-1">Description</label>
                       <textarea
+                        id="support-description"
                         name="description"
                         rows={4}
                         value={formData.description}
@@ -429,7 +490,7 @@ export default function SupportWidget() {
                     onClick={() => {
                       setReceiptId(null);
                       setSubmitError(null);
-                      setView("home");
+                      showView("home");
                     }}
                     className="vq-btn-ghost px-6 py-2 mt-4"
                   >
