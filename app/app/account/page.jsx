@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useConnectModal } from "@rainbow-me/rainbowkit";
-import { useAccount, useChainId } from "wagmi";
+import { useAccount } from "wagmi";
 import { PiggyBank, RotateCcw, Trophy, TrendingUp, Wallet } from "lucide-react";
 import AccountPositionSummary from "@/components/app/AccountPositionSummary";
 import UserDepositsList from "@/components/app/UserDepositsList";
@@ -154,8 +154,7 @@ function EmptyAccount() {
 const SUPPORTED_CHAIN_IDS = SUPPORTED_CHAINS.map((chain) => chain.id);
 
 export default function AccountPage() {
-  const { isConnected: wagmiConnected } = useAccount();
-  const chainId = useChainId();
+  const { isConnected: wagmiConnected, chainId } = useAccount();
   const { openConnectModal } = useConnectModal();
   const [fixtures, setFixtures] = useState({
     mockConnected: false,

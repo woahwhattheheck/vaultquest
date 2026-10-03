@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AccountPage from "./page";
 
@@ -64,7 +64,7 @@ describe("AccountPage", () => {
   beforeEach(() => {
     delete window.__VQ_ALLOW_ACCOUNT_TEST_FIXTURES__;
     window.history.replaceState({}, "", "/app/account");
-    mockWagmi.useAccount.mockReturnValue({ isConnected: false });
+    mockWagmi.useAccount.mockReturnValue({ isConnected: false, chainId: undefined });
     mockWagmi.useChainId.mockReturnValue(43113);
   });
 
@@ -74,15 +74,18 @@ describe("AccountPage", () => {
   });
 
   it("renders the connected dashboard from wagmi without URL fixtures", async () => {
-    mockWagmi.useAccount.mockReturnValue({ isConnected: true });
+    mockWagmi.useAccount.mockReturnValue({ isConnected: true, chainId: 43113 });
     render(<AccountPage />);
     expect(await screen.findByText("position-summary")).toBeInTheDocument();
     expect(screen.queryByText(/Wallet not connected/i)).not.toBeInTheDocument();
   });
 
-  it("derives network mismatch from the live chain id", async () => {
-    mockWagmi.useAccount.mockReturnValue({ isConnected: true });
-    mockWagmi.useChainId.mockReturnValue(1);
+  it.each([
+    [1, 43114],
+    [137, 43113],
+  ])("detects wallet chain %i while the configured chain remains %i", async (walletChainId, configuredChainId) => {
+    mockWagmi.useAccount.mockReturnValue({ isConnected: true, chainId: walletChainId });
+    mockWagmi.useChainId.mockReturnValue(configuredChainId);
     render(<AccountPage />);
     expect(await screen.findByText("mismatch-guidance")).toBeInTheDocument();
   });
@@ -95,4 +98,76 @@ describe("AccountPage", () => {
       expect(screen.getByText("position-summary")).toBeInTheDocument();
     });
   });
+  it("tracks supported, unsupported and disconnected states through real wagmi hooks", async () => {
+    const { createConfig, createConnector, WagmiProvider, useAccount, useChainId } =
+      await vi.importActual("wagmi");
+    const { connect, disconnect, getAccount, getChainId } =
+      await vi.importActual("wagmi/actions");
+    mockWagmi.useAccount.mockImplementation(useAccount);
+    mockWagmi.useChainId.mockImplementation(useChainId);
+
+    const accounts = ["0x1111111111111111111111111111111111111111"];
+    let walletChainId = 43114;
+    const config = createConfig({
+      chains: [
+        { id: 43114, name: "Avalanche" },
+        { id: 43113, name: "Avalanche Fuji" },
+      ],
+      connectors: [
+        createConnector(({ emitter }) => ({
+          id: "account-page-test",
+          name: "Account page test wallet",
+          type: "mock",
+          async connect() { return { accounts, chainId: walletChainId }; },
+          async disconnect() {},
+          async getAccounts() { return accounts; },
+          async getChainId() { return walletChainId; },
+          async getProvider() { return {}; },
+          async isAuthorized() { return false; },
+          onAccountsChanged(nextAccounts) { emitter.emit("change", { accounts: nextAccounts }); },
+          onChainChanged(chain) {
+            walletChainId = Number(chain);
+            emitter.emit("change", { chainId: walletChainId });
+          },
+          onDisconnect() { emitter.emit("disconnect"); },
+        })),
+      ],
+      transports: {},
+      storage: null,
+      multiInjectedProviderDiscovery: false,
+    });
+    const connector = config.connectors[0];
+
+    render(
+      <WagmiProvider config={config} reconnectOnMount={false}>
+        <AccountPage />
+      </WagmiProvider>,
+    );
+    expect(await screen.findByText(/Wallet not connected/i)).toBeInTheDocument();
+
+    await act(() => connect(config, { connector }));
+    expect(await screen.findByText("position-summary")).toBeInTheDocument();
+    expect(screen.queryByText("mismatch-guidance")).not.toBeInTheDocument();
+
+    await act(async () => connector.onChainChanged("0x1"));
+    expect(getAccount(config).chainId).toBe(1);
+    expect(getChainId(config)).toBe(43114);
+    expect(await screen.findByText("mismatch-guidance")).toBeInTheDocument();
+
+    await act(async () => connector.onChainChanged("0xa869"));
+    expect(getAccount(config).chainId).toBe(43113);
+    expect(getChainId(config)).toBe(43113);
+    expect(screen.queryByText("mismatch-guidance")).not.toBeInTheDocument();
+
+    await act(async () => connector.onChainChanged("0x89"));
+    expect(getAccount(config).chainId).toBe(137);
+    expect(getChainId(config)).toBe(43113);
+    expect(await screen.findByText("mismatch-guidance")).toBeInTheDocument();
+
+    await act(() => disconnect(config, { connector }));
+    expect(await screen.findByText(/Wallet not connected/i)).toBeInTheDocument();
+    expect(screen.queryByText("mismatch-guidance")).not.toBeInTheDocument();
+    expect(screen.queryByText("position-summary")).not.toBeInTheDocument();
+  });
+
 });
