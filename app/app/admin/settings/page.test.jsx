@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AdminSettingsPage from "./page";
@@ -113,8 +113,19 @@ function mockHealth(payload, { ok = true } = {}) {
   });
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("AdminSettingsPage live health", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -229,5 +240,92 @@ describe("AdminSettingsPage live health", () => {
     expect(screen.getAllByText("Degraded").length).toBeGreaterThan(0);
     expect(screen.queryByText("Healthy")).not.toBeInTheDocument();
     expect(screen.queryByTestId("health-dep-rpc")).not.toBeInTheDocument();
+  });
+
+  it("keeps the newest degraded poll when an older healthy body arrives late", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const oldBody = deferred();
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => oldBody.promise })
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => DEGRADED_PAYLOAD });
+    render(<AdminSettingsPage />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByTestId("health-dep-rpc")).toHaveAttribute("data-status", "degraded");
+
+    await act(async () => { oldBody.resolve(HEALTHY_PAYLOAD); });
+    expect(screen.getByTestId("health-dep-rpc")).toHaveAttribute("data-status", "degraded");
+    expect(screen.getByTestId("config-drift-panel")).toBeInTheDocument();
+    expect(global.fetch.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
+  it("ignores an older poll failure after a newer healthy response", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const oldRequest = deferred();
+    global.fetch = vi.fn()
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => HEALTHY_PAYLOAD });
+    render(<AdminSettingsPage />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { oldRequest.reject(new Error("Old request failed")); });
+
+    expect(screen.getByTestId("health-dep-rpc")).toHaveAttribute("data-status", "healthy");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps the newest failure when an older healthy body arrives late", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const oldBody = deferred();
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => oldBody.promise })
+      .mockRejectedValueOnce(new Error("Latest health probe failed"));
+    render(<AdminSettingsPage />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { oldBody.resolve(HEALTHY_PAYLOAD); });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Latest health probe failed");
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByTestId("health-dep-rpc")).not.toBeInTheDocument();
+  });
+
+  it("keeps refresh disabled until the newest overlapping poll settles", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const oldRequest = deferred();
+    const currentRequest = deferred();
+    global.fetch = vi.fn()
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockReturnValueOnce(currentRequest.promise);
+    render(<AdminSettingsPage />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => {
+      oldRequest.resolve({ ok: true, status: 200, json: async () => HEALTHY_PAYLOAD });
+    });
+    expect(screen.getByLabelText("Refresh health")).toBeDisabled();
+    expect(screen.queryByTestId("health-dep-rpc")).not.toBeInTheDocument();
+
+    await act(async () => {
+      currentRequest.resolve({ ok: true, status: 200, json: async () => STALE_PAYLOAD });
+    });
+    expect(screen.getByLabelText("Refresh health")).toBeEnabled();
+    expect(screen.getByTestId("health-dep-indexer")).toHaveAttribute("data-status", "stale");
+  });
+
+  it("cancels an outstanding poll and stops polling when the page unmounts", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const pendingRequest = deferred();
+    global.fetch = vi.fn().mockReturnValue(pendingRequest.promise);
+    const { unmount } = render(<AdminSettingsPage />);
+    const signal = global.fetch.mock.calls[0][1].signal;
+
+    unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => {
+      pendingRequest.resolve({ ok: true, status: 200, json: async () => HEALTHY_PAYLOAD });
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });

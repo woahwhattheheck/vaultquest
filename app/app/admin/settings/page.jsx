@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -185,14 +185,20 @@ export default function AdminSettingsPage() {
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const activeRequest = useRef(null);
 
   const loadHealth = useCallback(async () => {
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    const isCurrent = () => activeRequest.current === controller && !controller.signal.aborted;
     setLoading(true);
     setError(null);
     try {
       const response = await fetch("/api/admin/health", {
         method: "GET",
         cache: "no-store",
+        signal: controller.signal,
       });
       let payload = null;
       try {
@@ -203,19 +209,28 @@ export default function AdminSettingsPage() {
       if (!payload || typeof payload !== "object" || !Array.isArray(payload.dependencies)) {
         throw new Error("Admin health endpoint returned an invalid payload");
       }
-      setHealth(payload);
+      // A prior request may finish parsing even after its fetch was aborted.
+      if (isCurrent()) setHealth(payload);
     } catch (err) {
+      if (!isCurrent()) return;
       setHealth(null);
       setError(err instanceof Error ? err.message : "Unable to load live dependency health");
     } finally {
-      setLoading(false);
+      if (isCurrent()) {
+        activeRequest.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     loadHealth();
     const interval = setInterval(loadHealth, HEALTH_POLL_MS);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      activeRequest.current?.abort();
+      activeRequest.current = null;
+    };
   }, [loadHealth]);
 
   const dependencies = health?.dependencies ?? [];
