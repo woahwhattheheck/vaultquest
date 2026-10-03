@@ -151,6 +151,17 @@ function QueuedAction({ action, onRetry, onCancel, onDismiss, busy }) {
   );
 }
 
+function createQueueState(context) {
+  return {
+    context,
+    actions: [],
+    loading: Boolean(context.walletAddress),
+    loadError: null,
+    busyId: null,
+    actionError: null,
+  };
+}
+
 /**
  * Ledger-backed retry queue (#121).
  *
@@ -179,42 +190,69 @@ export default function VaultRetryQueue({
     [clientProp, getAuthHeaders, walletAddress]
   );
 
-  const [actions, setActions] = useState([]);
+  const context = useMemo(
+    () => ({
+      walletAddress,
+      client,
+      inFlightIds: new Set(),
+      dismissedIds: new Set(),
+    }),
+    [walletAddress, client],
+  );
+  const [queueState, setQueueState] = useState(() => createQueueState(context));
   const [collapsed, setCollapsed] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(null);
-  const [busyId, setBusyId] = useState(null);
-  const [actionError, setActionError] = useState(null);
-  const inFlightRef = useRef(new Set());
-  const dismissedRef = useRef(new Set());
+  const reloadSequence = useRef({ value: 0 });
+  // A new wallet/client must not render the preceding context's rows, even
+  // before its passive effect starts the next request.
+  const { actions, loading, loadError, busyId, actionError } =
+    queueState.context === context ? queueState : createQueueState(context);
+
+  const updateQueue = useCallback(
+    (update) => {
+      setQueueState((previous) => {
+        if (previous.context !== context) return previous;
+        const changes = typeof update === "function" ? update(previous) : update;
+        return { ...previous, ...changes };
+      });
+    },
+    [context],
+  );
 
   const reload = useCallback(async () => {
+    const sequence = ++reloadSequence.current.value;
     if (!walletAddress) {
-      setActions([]);
-      setLoadError(null);
+      setQueueState(createQueueState(context));
       return;
     }
-    setLoading(true);
-    setLoadError(null);
+    setQueueState((previous) => ({
+      ...(previous.context === context ? previous : createQueueState(context)),
+      loading: true,
+      loadError: null,
+    }));
     try {
       const rows = await client.listQueueActions(walletAddress);
-      setActions(rows.filter((r) => !dismissedRef.current.has(r.id)));
+      if (sequence !== reloadSequence.current.value) return;
+      updateQueue({
+        actions: rows.filter((r) => !context.dismissedIds.has(r.id)),
+      });
     } catch (err) {
-      setLoadError(err?.message || "Failed to load retry queue");
-      setActions([]);
+      if (sequence !== reloadSequence.current.value) return;
+      updateQueue({
+        loadError: err?.message || "Failed to load retry queue",
+        actions: [],
+      });
     } finally {
-      setLoading(false);
+      if (sequence === reloadSequence.current.value) updateQueue({ loading: false });
     }
-  }, [client, walletAddress]);
+  }, [client, context, updateQueue, walletAddress]);
 
-  // Reload when the connected wallet changes; clear local state so rows never
-  // leak across identities.
   useEffect(() => {
-    dismissedRef.current = new Set();
-    inFlightRef.current = new Set();
-    setActionError(null);
+    const requests = reloadSequence.current;
     reload();
-  }, [walletAddress, reload]);
+    return () => {
+      ++requests.value;
+    };
+  }, [reload]);
 
   const failedCount = actions.filter((a) => a.status === "failed").length;
   const pendingCount = actions.filter((a) => a.status === "pending").length;
@@ -223,14 +261,15 @@ export default function VaultRetryQueue({
   const handleRetry = useCallback(
     async (action) => {
       if (!walletAddress) return;
-      if (inFlightRef.current.has(action.id)) {
-        setActionError("Retry already in progress (duplicate click ignored).");
+      if (context.inFlightIds.has(action.id)) {
+        updateQueue({
+          actionError: "Retry already in progress (duplicate click ignored).",
+        });
         return;
       }
 
-      inFlightRef.current.add(action.id);
-      setBusyId(action.id);
-      setActionError(null);
+      context.inFlightIds.add(action.id);
+      updateQueue({ busyId: action.id, actionError: null });
 
       try {
         let fresh = action;
@@ -243,9 +282,13 @@ export default function VaultRetryQueue({
         }
 
         if (fresh.status === "confirmed") {
-          setActionError("Action was confirmed on-chain; retry blocked.");
-          dismissedRef.current.add(action.id);
-          setActions((prev) => prev.filter((a) => a.id !== action.id));
+          updateQueue({
+            actionError: "Action was confirmed on-chain; retry blocked.",
+          });
+          context.dismissedIds.add(action.id);
+          updateQueue((previous) => ({
+            actions: previous.actions.filter((a) => a.id !== action.id),
+          }));
           return;
         }
 
@@ -255,66 +298,80 @@ export default function VaultRetryQueue({
           requestSign,
         });
 
-        dismissedRef.current.add(action.id);
-        setActions((prev) => {
-          const withoutParent = prev.filter((a) => a.id !== action.id);
-          if (created && !withoutParent.some((a) => a.id === created.id)) {
-            return [created, ...withoutParent];
-          }
-          return withoutParent;
+        context.dismissedIds.add(action.id);
+        updateQueue((previous) => {
+          const withoutParent = previous.actions.filter(
+            (a) => a.id !== action.id,
+          );
+          return {
+            actions:
+              created && !withoutParent.some((a) => a.id === created.id)
+                ? [created, ...withoutParent]
+                : withoutParent,
+          };
         });
       } catch (err) {
-        setActionError(err?.message || "Retry failed");
+        updateQueue({ actionError: err?.message || "Retry failed" });
       } finally {
-        inFlightRef.current.delete(action.id);
-        setBusyId(null);
+        context.inFlightIds.delete(action.id);
+        updateQueue({ busyId: null });
       }
     },
-    [client, requestSign, walletAddress]
+    [client, context, requestSign, updateQueue, walletAddress],
   );
 
   const handleCancel = useCallback(
     async (action) => {
       if (!walletAddress) return;
-      if (inFlightRef.current.has(action.id)) {
-        setActionError("Cancel already in progress (duplicate click ignored).");
+      if (context.inFlightIds.has(action.id)) {
+        updateQueue({
+          actionError: "Cancel already in progress (duplicate click ignored).",
+        });
         return;
       }
 
-      inFlightRef.current.add(action.id);
-      setBusyId(action.id);
-      setActionError(null);
+      context.inFlightIds.add(action.id);
+      updateQueue({ busyId: action.id, actionError: null });
 
       try {
         await client.cancelAction(action, {
           walletAddress,
         });
-        dismissedRef.current.add(action.id);
-        setActions((prev) => prev.filter((a) => a.id !== action.id));
+        context.dismissedIds.add(action.id);
+        updateQueue((previous) => ({
+          actions: previous.actions.filter((a) => a.id !== action.id),
+        }));
       } catch (err) {
         if (err?.code === "already_failed" || err?.details?.dismissLocally) {
-          dismissedRef.current.add(action.id);
-          setActions((prev) => prev.filter((a) => a.id !== action.id));
+          context.dismissedIds.add(action.id);
+          updateQueue((previous) => ({
+            actions: previous.actions.filter((a) => a.id !== action.id),
+          }));
         } else {
-          setActionError(err?.message || "Cancel failed");
+          updateQueue({ actionError: err?.message || "Cancel failed" });
         }
       } finally {
-        inFlightRef.current.delete(action.id);
-        setBusyId(null);
+        context.inFlightIds.delete(action.id);
+        updateQueue({ busyId: null });
       }
     },
-    [client, walletAddress]
+    [client, context, updateQueue, walletAddress],
   );
 
-  const handleDismiss = useCallback((action) => {
-    dismissedRef.current.add(action.id);
-    setActions((prev) => prev.filter((a) => a.id !== action.id));
-  }, []);
+  const handleDismiss = useCallback(
+    (action) => {
+      context.dismissedIds.add(action.id);
+      updateQueue((previous) => ({
+        actions: previous.actions.filter((a) => a.id !== action.id),
+      }));
+    },
+    [context, updateQueue],
+  );
 
   const handleClearAll = useCallback(() => {
-    for (const a of actions) dismissedRef.current.add(a.id);
-    setActions([]);
-  }, [actions]);
+    for (const a of actions) context.dismissedIds.add(a.id);
+    updateQueue({ actions: [] });
+  }, [actions, context, updateQueue]);
 
   if (!walletAddress) return null;
   if (!loading && !loadError && totalCount === 0) return null;
@@ -386,57 +443,59 @@ export default function VaultRetryQueue({
         </div>
       </div>
 
-      <AnimatePresence>
-        {!collapsed && (
-          <motion.div
-            id="retry-queue-content"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-          >
-            {loadError && (
-              <p className="mt-2 text-sm text-red-500" role="alert">
-                {loadError}
+      {queueState.context === context && (
+        <AnimatePresence>
+          {!collapsed && (
+            <motion.div
+              id="retry-queue-content"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              {loadError && (
+                <p className="mt-2 text-sm text-red-500" role="alert">
+                  {loadError}
+                </p>
+              )}
+              {actionError && (
+                <p className="mt-2 text-sm text-red-500" role="alert">
+                  {actionError}
+                </p>
+              )}
+              <p className="mt-2 text-sm text-vault-muted">
+                {loading
+                  ? "Loading actions from the ledger…"
+                  : failedCount > 0
+                    ? `${failedCount} transaction${failedCount > 1 ? "s" : ""} failed. Retry creates a fresh signed attempt linked to the original ledger record.`
+                    : `${pendingCount} transaction${pendingCount > 1 ? "s" : ""} waiting to be processed.`}
               </p>
-            )}
-            {actionError && (
-              <p className="mt-2 text-sm text-red-500" role="alert">
-                {actionError}
-              </p>
-            )}
-            <p className="mt-2 text-sm text-vault-muted">
-              {loading
-                ? "Loading actions from the ledger…"
-                : failedCount > 0
-                  ? `${failedCount} transaction${failedCount > 1 ? "s" : ""} failed. Retry creates a fresh signed attempt linked to the original ledger record.`
-                  : `${pendingCount} transaction${pendingCount > 1 ? "s" : ""} waiting to be processed.`}
-            </p>
 
-            <ul className="mt-4 space-y-3" role="list">
-              <AnimatePresence>
-                {actions.map((action) => (
-                  <QueuedAction
-                    key={action.id}
-                    action={action}
-                    onRetry={handleRetry}
-                    onCancel={handleCancel}
-                    onDismiss={handleDismiss}
-                    busy={busyId === action.id}
-                  />
-                ))}
-              </AnimatePresence>
-            </ul>
+              <ul className="mt-4 space-y-3" role="list">
+                <AnimatePresence>
+                  {actions.map((action) => (
+                    <QueuedAction
+                      key={action.id}
+                      action={action}
+                      onRetry={handleRetry}
+                      onCancel={handleCancel}
+                      onDismiss={handleDismiss}
+                      busy={busyId === action.id}
+                    />
+                  ))}
+                </AnimatePresence>
+              </ul>
 
-            {totalCount > 0 && (
-              <div className="mt-4 flex items-center gap-2 rounded-lg bg-vault-surface/50 px-4 py-3 text-xs text-vault-muted">
-                <CheckCircle2 className="h-4 w-4 text-emerald-500" aria-hidden="true" />
-                Retries never auto-sign. Successful attempts appear in Activity after confirmation.
-              </div>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
+              {totalCount > 0 && (
+                <div className="mt-4 flex items-center gap-2 rounded-lg bg-vault-surface/50 px-4 py-3 text-xs text-vault-muted">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" aria-hidden="true" />
+                  Retries never auto-sign. Successful attempts appear in Activity after confirmation.
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      )}
     </section>
   );
 }

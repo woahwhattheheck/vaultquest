@@ -92,3 +92,41 @@ The fixed native run verified the pending retry row and removed cancel row as re
 ### Verification limits
 
 No dependency installation, manifest/lockfile change, upstream merge or signing-provider call was performed. The real `nanostores` integration, ordinary full workspace test configuration, sponsor Node 20 matrix, full Next application/production build, full route smoke/Playwright suite, authenticated backend/Postgres integration and deployed ledger were not exercised by this partial runtime. This continuation verifies the component/client composition defect and preserves the existing backend and wallet contracts.
+
+
+## Wallet/client reload ownership
+
+The next continuation starts from `f026e2884aaff1488f40eda2449ec131b5bf3884` and fixes a separate wallet-switch race. The prior first-click lock repair remains intact.
+
+Previously, every completed list request could replace the visible rows, error, and loading state. Switching wallets started another request but did not immediately clear the previous rows or invalidate its pending response. A slower wallet A response could therefore replace wallet B's queue, and an A failure could clear B's rows and display the wrong error. Replacing the client while retaining the wallet had the same ownership gap.
+
+Queue state and the local duplicate-click/dismissal sets now belong to a wallet/client context. A render with a different context immediately uses empty/loading state, before passive effects run. The outer content animation boundary is also unmounted, so neither a closing section nor row exit animation can retain another wallet's rows. Async state updates only apply to their originating context. Reload sequence numbers preserve the newest request within a context and invalidate pending requests on cleanup; stale success, error, and `finally` paths cannot overwrite the current load. Old retry/cancel completions likewise cannot change another context's UI. The client, policy, request payloads, signing behavior, and backend are unchanged; this is not transport cancellation of an already-started operation.
+
+### Native before/after evidence
+
+Chromium **153.0.8010.0** mounted the actual component and `createRetryQueueClient` against a local HTTP ledger. An explicit `get`/`set`/`subscribe` wallet-store fixture controlled wallet selection because no retained `nanostores` package was available. Each phase made eight real ledger GET requests, with no mutations, provider calls, external page requests, or page exceptions. The same retained stylesheet and dependency versions were used for both phases.
+
+| Held-response scenario | Exact preceding component | Corrected component |
+| --- | --- | --- |
+| A success arrives after B has loaded | A's row replaces B's row under B's identity | B's row remains, with no A row or error |
+| A HTTP 500 arrives after B has loaded | B's rows disappear; A's stale error is shown | B's row remains without the stale error |
+| A is loaded, then B's response is held | A's row remains visible while B loads | No previous rows are visible; B remains loading |
+| A is collapsing when the wallet switches | A's exiting row remains under B's identity | The previous content boundary is removed immediately; expanding after B resolves shows B |
+
+These captures show the same held-B state after switching away from wallet A:
+
+![Before: wallet A row remains while the new wallet loads](images/retry-queue-wallet-switch-before.png)
+
+![After: the new wallet loads without wallet A rows](images/retry-queue-wallet-switch-after.png)
+
+The captures are isolated component evidence, not a full application or authenticated-backend run. Both native browser/server processes were closed after each phase.
+
+### Maintained checks and runtime limits
+
+The existing policy/client/component selection passes **40 tests**: 13 policy, five client, and 22 component cases. The 14 added component cases cover first-commit visibility before passive effects (including an active collapse animation), wallet and client changes with late successes/failures, current loading state, ordering of same-wallet refreshes, and old retry/cancel UI completions. With the exact preceding component and otherwise identical final tests/runtime, **14 fail and 26 pass**. All 26 original cases remain intact.
+
+The native and maintained checks reuse Node 24.19.0 and React/ReactDOM 18.3.1. The maintained runtime uses Vitest 3.2.7, Vite 7.3.6, jsdom 27.4.0, Testing Library React 16.3.2, Framer Motion 12.42.2, and Lucide 0.378.0. These differ from several declared ranges and from the earlier continuation's runtime; they are not a sponsor Node 20 or lockfile-exact result. The native bundle uses esbuild 0.28.2 and Playwright-core 1.62.1. The maintained tests still import the real wallet-store path; its explicit boundary alias and React deduplication exist only in the local runtime configuration. Existing jsdom `scrollTo` diagnostics and asynchronous `act` warnings from older cases remain visible.
+
+Scoped ESLint 8.57.1 with the repository's Next 14.2.33 configuration passes with zero errors or warnings. The product-term check passes for the sparse checkout containing the changed files, and the source whitespace check passes. These are not whole-repository lint or product-term claims.
+
+No dependencies were installed and no manifests, lockfiles, production aliases, or committed test configuration changed. A full Next build, route-smoke/E2E suite, real nanostores integration, authenticated action ledger/Postgres, deployed backend, and wallet/chain actions were not exercised. Hosted workflow approval and maintainer acceptance remain separate from these local results.

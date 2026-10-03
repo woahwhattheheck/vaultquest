@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import VaultRetryQueue from "./VaultRetryQueue";
 import { connectedPublicKey } from "@vaultquest/stellar-wallet-connect/src/core/store";
 import { createRetryQueueClient } from "@/lib/retry-queue-client";
@@ -26,6 +26,16 @@ function makeRow(overrides = {}) {
     ledger: { id: "act-001", status: "failed" },
     ...overrides,
   };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("VaultRetryQueue", () => {
@@ -230,4 +240,266 @@ describe("VaultRetryQueue", () => {
       }
     },
   );
+  it.each([
+    ["wallet", false],
+    ["client", false],
+    ["wallet", true],
+    ["client", true],
+  ])(
+    "hides previous rows in the first committed render after a %s change (collapsed: %s)",
+    async (change, collapseBeforeChange) => {
+      const next = deferred();
+      const client = {
+        listQueueActions: vi
+          .fn()
+          .mockResolvedValueOnce([makeRow()])
+          .mockReturnValue(next.promise),
+      };
+      const nextClient =
+        change === "client"
+          ? { listQueueActions: vi.fn().mockReturnValue(next.promise) }
+          : client;
+      const nextWallet = change === "wallet" ? WALLET_B : WALLET;
+      const commits = [];
+      function ObservedQueue({ walletAddress, ledgerClient }) {
+        React.useLayoutEffect(() => {
+          commits.push(
+            [...document.querySelectorAll("[data-action-id]")].map((row) =>
+              row.getAttribute("data-action-id"),
+            ),
+          );
+        }, [walletAddress, ledgerClient]);
+        return (
+          <VaultRetryQueue walletAddress={walletAddress} client={ledgerClient} />
+        );
+      }
+      const { rerender } = render(
+        <ObservedQueue walletAddress={WALLET} ledgerClient={client} />,
+      );
+      await screen.findByText(/USDC Yield Pool/);
+      if (collapseBeforeChange) {
+        const content = document.getElementById("retry-queue-content");
+        const row = document.querySelector('[data-action-id="act-001"]');
+        // Finish entry before starting an exit that can retain the old rows.
+        await waitFor(() => {
+          expect(content).toHaveStyle({ opacity: "1" });
+          expect(row).toHaveStyle({ opacity: "1" });
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Collapse queue" }));
+        expect(screen.getByRole("button", { name: "Expand queue" })).toBeInTheDocument();
+        expect(document.querySelector('[data-action-id="act-001"]')).toBeInTheDocument();
+      }
+      commits.length = 0;
+      rerender(
+        <ObservedQueue walletAddress={nextWallet} ledgerClient={nextClient} />,
+      );
+      try {
+        expect(commits).toEqual([[]]);
+        if (collapseBeforeChange) {
+          expect(document.querySelector('[data-action-id="act-001"]')).toBeNull();
+          fireEvent.click(screen.getByRole("button", { name: "Expand queue" }));
+        }
+        expect(
+          screen.getByText(/Loading actions from the ledger/),
+        ).toBeInTheDocument();
+      } finally {
+        await act(async () =>
+          next.resolve([
+            makeRow({
+              id: "act-new",
+              walletAddress: nextWallet,
+              pool: "Current Pool",
+            }),
+          ]),
+        );
+      }
+      expect(screen.getByText(/Current Pool/)).toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["wallet", "success"],
+    ["wallet", "failure"],
+    ["client", "success"],
+    ["client", "failure"],
+  ])(
+    "ignores a preceding %s context's late %s after current rows load",
+    async (change, outcome) => {
+      const old = deferred();
+      const nextWallet = change === "wallet" ? WALLET_B : WALLET;
+      const current = makeRow({
+        id: "act-current",
+        walletAddress: nextWallet,
+        pool: "Current Pool",
+      });
+      const client = {
+        listQueueActions: vi
+          .fn()
+          .mockReturnValueOnce(old.promise)
+          .mockResolvedValue([current]),
+      };
+      const nextClient =
+        change === "client"
+          ? { listQueueActions: vi.fn().mockResolvedValue([current]) }
+          : client;
+      const { rerender } = render(
+        <VaultRetryQueue walletAddress={WALLET} client={client} />,
+      );
+      await waitFor(() =>
+        expect(client.listQueueActions).toHaveBeenCalledTimes(1),
+      );
+      rerender(
+        <VaultRetryQueue walletAddress={nextWallet} client={nextClient} />,
+      );
+      await screen.findByText(/Current Pool/);
+      await act(async () => {
+        if (outcome === "failure")
+          old.reject(new Error("Previous context failure"));
+        else old.resolve([makeRow({ pool: "Previous Pool" })]);
+      });
+      expect(screen.getByText(/Current Pool/)).toBeInTheDocument();
+      expect(screen.queryByText(/Previous Pool/)).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+    },
+  );
+
+  it.each(["success", "failure"])(
+    "keeps the new wallet loading when an old request completes with %s",
+    async (outcome) => {
+      const old = deferred();
+      const current = deferred();
+      const client = {
+        listQueueActions: vi
+          .fn()
+          .mockReturnValueOnce(old.promise)
+          .mockReturnValueOnce(current.promise),
+      };
+      const { rerender } = render(
+        <VaultRetryQueue walletAddress={WALLET} client={client} />,
+      );
+      await waitFor(() =>
+        expect(client.listQueueActions).toHaveBeenCalledTimes(1),
+      );
+      rerender(<VaultRetryQueue walletAddress={WALLET_B} client={client} />);
+      await waitFor(() =>
+        expect(client.listQueueActions).toHaveBeenCalledWith(WALLET_B),
+      );
+      await act(async () => {
+        if (outcome === "failure")
+          old.reject(new Error("Previous context failure"));
+        else old.resolve([makeRow()]);
+      });
+      try {
+        expect(
+          screen.getByText(/Loading actions from the ledger/),
+        ).toBeInTheDocument();
+        expect(document.querySelector("[data-action-id]")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+      } finally {
+        await act(async () =>
+          current.resolve([
+            makeRow({
+              id: "act-current",
+              walletAddress: WALLET_B,
+              pool: "Current Pool",
+            }),
+          ]),
+        );
+      }
+      expect(screen.getByText(/Current Pool/)).toBeInTheDocument();
+    },
+  );
+
+  it.each(["success", "failure"])(
+    "retains the latest same-wallet refresh after an older %s",
+    async (outcome) => {
+      const old = deferred();
+      const client = {
+        listQueueActions: vi
+          .fn()
+          .mockResolvedValueOnce([makeRow()])
+          .mockReturnValueOnce(old.promise)
+          .mockResolvedValueOnce([
+            makeRow({ id: "act-current", pool: "Current Pool" }),
+          ]),
+      };
+      render(<VaultRetryQueue walletAddress={WALLET} client={client} />);
+      await screen.findByText(/USDC Yield Pool/);
+      const refresh = screen.getByRole("button", {
+        name: "Refresh retry queue from ledger",
+      });
+      fireEvent.click(refresh);
+      await waitFor(() =>
+        expect(client.listQueueActions).toHaveBeenCalledTimes(2),
+      );
+      fireEvent.click(refresh);
+      await screen.findByText(/Current Pool/);
+      await act(async () => {
+        if (outcome === "failure")
+          old.reject(new Error("Previous refresh failure"));
+        else old.resolve([makeRow({ id: "act-old", pool: "Previous Pool" })]);
+      });
+      expect(screen.getByText(/Current Pool/)).toBeInTheDocument();
+      expect(screen.queryByText(/Previous Pool/)).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+    },
+  );
+
+  it.each(["retry", "cancel"])(
+    "keeps old %s completion out of the new wallet's UI",
+    async (operation) => {
+      const old = deferred();
+      const original = makeRow(
+        operation === "cancel" ? { status: "pending", errorCode: null } : {},
+      );
+      const client = {
+        listQueueActions: vi
+          .fn()
+          .mockResolvedValueOnce([original])
+          .mockResolvedValueOnce([
+            makeRow({
+              id: "act-current",
+              walletAddress: WALLET_B,
+              pool: "Current Pool",
+            }),
+          ]),
+        getAction: vi.fn().mockResolvedValue(original),
+        createRetryAttempt: vi.fn().mockReturnValue(old.promise),
+        cancelAction: vi.fn().mockReturnValue(old.promise),
+      };
+      const { rerender } = render(
+        <VaultRetryQueue walletAddress={WALLET} client={client} />,
+      );
+      const button = await screen.findByRole("button", {
+        name: operation === "retry" ? "Retry deposit" : "Cancel pending action",
+      });
+      fireEvent.click(button);
+      await waitFor(() =>
+        expect(
+          operation === "retry" ? client.createRetryAttempt : client.cancelAction,
+        ).toHaveBeenCalledTimes(1),
+      );
+      rerender(<VaultRetryQueue walletAddress={WALLET_B} client={client} />);
+      await screen.findByText(/Current Pool/);
+      await act(async () => {
+        if (operation === "retry")
+          old.resolve({
+            action: makeRow({
+              id: "act-old-retry",
+              pool: "Previous Retry",
+              status: "pending",
+              errorCode: null,
+            }),
+          });
+        else old.reject(new Error("Previous cancel failure"));
+      });
+      expect(screen.getByText(/Current Pool/)).toBeInTheDocument();
+      expect(screen.queryByText(/Previous Retry/)).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(
+        screen.getByRole("button", { name: "Retry deposit" }),
+      ).not.toBeDisabled();
+    },
+  );
+
 });
