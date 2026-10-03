@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Bell, CheckCircle2, AlertCircle, ShieldCheck } from "lucide-react";
 import {
   connectedPublicKey,
@@ -11,6 +11,10 @@ import {
   saveNotificationPrefs,
   OPTIONAL_PREF_KEYS,
 } from "@/lib/notification-prefs";
+import {
+  loadNotificationPreferences,
+  saveNotificationPreferences,
+} from "@/lib/notification-prefs-client";
 
 function useNanostoreValue(store, fallback) {
   const [value, setValue] = useState(() => {
@@ -34,7 +38,7 @@ const TOGGLE_ROWS = [
   {
     key: "roundUpdates",
     title: "Round Updates",
-    description: "Get notified when rounds complete",
+    description: "Get notified when draw actions complete",
   },
   {
     key: "actionStatus",
@@ -43,8 +47,8 @@ const TOGGLE_ROWS = [
   },
   {
     key: "winnings",
-    title: "Winning Notifications",
-    description: "Alert when you win a prize",
+    title: "Prize Claim Notifications",
+    description: "Get notified when prize claims are confirmed",
   },
   {
     key: "deposits",
@@ -56,170 +60,116 @@ const TOGGLE_ROWS = [
 export default function VaultNotificationSettings({
   storage,
   fetchImpl,
+  signMessage,
 } = {}) {
   const wallet = useNanostoreValue(connectedPublicKey, "");
-  const browserStorage =
-    storage ||
-    (typeof window !== "undefined" ? window.localStorage : null);
-  const doFetch = fetchImpl || (typeof fetch !== "undefined" ? fetch : null);
-
+  const browserStorage = useMemo(() => {
+    if (storage !== undefined) return storage;
+    try {
+      return typeof window !== "undefined" ? window.localStorage : null;
+    } catch {
+      return null;
+    }
+  }, [storage]);
   const [settings, setSettings] = useState({ ...DEFAULT_PREFS });
+  const [stateWallet, setStateWallet] = useState("");
   const [showSaved, setShowSaved] = useState(false);
   const [error, setError] = useState(null);
-  const [isSaving, setIsSaving] = useState(false);
+  const [cacheNotice, setCacheNotice] = useState(null);
+  const [pending, setPending] = useState(null);
   const [loadedWallet, setLoadedWallet] = useState("");
-  const walletSession = useRef(null);
-  const isReady = Boolean(wallet) && loadedWallet === wallet;
+  const [revision, setRevision] = useState(null);
+  const request = useRef({ generation: 0, controller: null, pending: false });
+  const cacheWritable = useRef(true);
 
   useEffect(() => {
-    const session = { wallet: wallet || "", active: true, saving: false };
-    walletSession.current = session;
-    const controller = new AbortController();
-    let timeout;
-    const isCurrent = () => session.active && walletSession.current === session;
-
+    request.current.controller?.abort();
+    request.current = { generation: request.current.generation + 1, controller: null, pending: false };
+    setStateWallet(wallet);
     setLoadedWallet("");
-    setSettings({ ...DEFAULT_PREFS });
+    setRevision(null);
+    setPending(null);
     setError(null);
     setShowSaved(false);
-    setIsSaving(false);
-
-    async function hydrate() {
-      if (!session.wallet) return;
-
-      if (browserStorage) {
-        const local = loadNotificationPrefs(browserStorage, session.wallet);
-        if (local.ok && local.record) {
-          setSettings({ ...DEFAULT_PREFS, ...local.record.prefs });
-        } else if (!local.ok && local.reason === "newer-version") {
-          setError("Saved preferences use a newer format and were left untouched.");
-          setSettings({ ...DEFAULT_PREFS });
-        } else if (!local.ok && local.reason === "corrupt") {
-          setError("Saved preferences were unreadable and were left untouched.");
-          setSettings({ ...DEFAULT_PREFS });
-        } else {
-          setSettings({ ...DEFAULT_PREFS });
-        }
+    setCacheNotice(null);
+    setSettings({ ...DEFAULT_PREFS });
+    cacheWritable.current = true;
+    if (wallet && browserStorage) {
+      const local = loadNotificationPrefs(browserStorage, wallet);
+      if (local.ok && local.record) {
+        setSettings({ ...DEFAULT_PREFS, ...local.record.prefs });
+      } else if (local.reason === "newer-version" || local.reason === "corrupt") {
+        cacheWritable.current = false;
+        setCacheNotice("The existing browser copy was left untouched. Load the server copy to manage your preferences.");
       }
-
-      if (doFetch) {
-        timeout = setTimeout(() => controller.abort(), 5000);
-        try {
-          const res = await doFetch(
-            `/api/notification-prefs?wallet=${encodeURIComponent(session.wallet)}`,
-            { signal: controller.signal },
-          );
-          if (!isCurrent()) return;
-          if (res.ok) {
-            const json = await res.json();
-            if (isCurrent() && json?.data?.prefs) {
-              setSettings({ ...DEFAULT_PREFS, ...json.data.prefs, securityNotices: true });
-            }
-          }
-        } catch {
-          // Local prefs remain authoritative if the server is unreachable.
-        } finally {
-          clearTimeout(timeout);
-        }
-      }
-
-      if (isCurrent()) setLoadedWallet(session.wallet);
     }
-
-    void hydrate();
     return () => {
-      // Cancel reads and invalidate completions, including a switch back to
-      // the same wallet while an older request is still in flight.
-      session.active = false;
-      controller.abort();
-      clearTimeout(timeout);
+      request.current.controller?.abort();
+      request.current.generation += 1;
     };
-  }, [wallet, browserStorage, doFetch]);
+  }, [wallet, browserStorage]);
+
+  const currentSettings = stateWallet === wallet ? settings : DEFAULT_PREFS;
+  const isLoaded = Boolean(wallet && loadedWallet === wallet && revision !== null);
+  const isBusy = Boolean(pending && stateWallet === wallet);
+
+  const cacheRecord = (record) => {
+    if (!browserStorage || !cacheWritable.current) return;
+    const saved = saveNotificationPrefs(browserStorage, record.wallet, record.prefs, record.updatedAt);
+    if (!saved.ok) {
+      setCacheNotice("Preferences are stored on the server, but this browser could not cache them.");
+    }
+  };
+
+  const performRequest = async (kind) => {
+    if (!wallet || request.current.pending || (kind === "save" && !isLoaded)) return;
+    request.current.controller?.abort();
+    const controller = new AbortController();
+    const generation = request.current.generation + 1;
+    request.current = { generation, controller, pending: true };
+    const isCurrent = () => request.current.generation === generation && connectedPublicKey.get() === wallet;
+    setPending(kind);
+    setError(null);
+    setShowSaved(false);
+    try {
+      const options = { fetchImpl, signMessage, signal: controller.signal, isCurrent };
+      const record = kind === "load"
+        ? await loadNotificationPreferences(wallet, options)
+        : await saveNotificationPreferences(wallet, currentSettings, revision, options);
+      if (!isCurrent()) return;
+      setSettings({ ...record.prefs });
+      setStateWallet(wallet);
+      setLoadedWallet(wallet);
+      setRevision(record.revision);
+      cacheRecord(record);
+      setShowSaved(kind === "save");
+    } catch (err) {
+      if (!isCurrent()) return;
+      if (err?.status === 409) {
+        setRevision(null);
+        setError("Preferences changed elsewhere. Load saved preferences, then apply your changes again.");
+      } else {
+        setError(err?.name === "AbortError"
+          ? "The notification service did not respond in time. Try again."
+          : err?.message || "The wallet request could not be completed. Try again.");
+      }
+    } finally {
+      if (isCurrent()) {
+        request.current.pending = false;
+        setPending(null);
+      }
+    }
+  };
 
   const toggleSetting = (key) => {
-    if (
-      !isReady ||
-      isSaving ||
-      walletSession.current?.saving ||
-      !OPTIONAL_PREF_KEYS.includes(key)
-    ) return;
+    if (!isLoaded || isBusy || !OPTIONAL_PREF_KEYS.includes(key)) return;
     setSettings((prev) => ({ ...prev, [key]: !prev[key] }));
     setShowSaved(false);
     setError(null);
   };
 
-  const handleSave = async () => {
-    if (!wallet) {
-      setError("Connect a wallet to save notification preferences.");
-      return;
-    }
-
-    const session = walletSession.current;
-    if (
-      !isReady ||
-      !session?.active ||
-      session.wallet !== wallet ||
-      session.saving
-    ) return;
-    session.saving = true;
-    const isCurrent = () => session.active && walletSession.current === session;
-
-    setError(null);
-    setShowSaved(false);
-    setIsSaving(true);
-    try {
-      if (browserStorage) {
-        const local = saveNotificationPrefs(browserStorage, wallet, settings);
-        if (!local.ok) {
-          setError(
-            local.reason === "write-failed"
-              ? "Could not write preferences to this browser (storage blocked)."
-              : "Could not save preferences locally.",
-          );
-          return;
-        }
-      }
-
-      if (doFetch) {
-        const res = await doFetch("/api/notification-prefs", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            wallet_address: wallet,
-            prefs: {
-              roundUpdates: settings.roundUpdates,
-              actionStatus: settings.actionStatus,
-              winnings: settings.winnings,
-              deposits: settings.deposits,
-              securityNotices: true,
-            },
-          }),
-          signal: AbortSignal.timeout(8000),
-        });
-        if (!isCurrent()) return;
-        if (!res.ok) {
-          setError("Preferences were saved on this device, but the server copy failed. Retry when online.");
-          // Still treat local save as partial success indicator? Prefer honest error.
-          return;
-        }
-      }
-
-      if (isCurrent()) setShowSaved(true);
-    } catch {
-      if (isCurrent()) {
-        setError("Preferences could not be saved right now. Try again.");
-      }
-    } finally {
-      session.saving = false;
-      if (isCurrent()) setIsSaving(false);
-    }
-  };
-
   return (
-    <section
-      className="vq-glass-hover p-6 space-y-4"
-      aria-busy={Boolean(wallet) && (!isReady || isSaving)}
-    >
+    <section className="vq-glass-hover p-6 space-y-4">
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-vault-accent/10 text-vault-accent border border-vault-accent/20">
           <Bell size={20} />
@@ -236,6 +186,20 @@ export default function VaultNotificationSettings({
         </div>
       </div>
 
+      {wallet && !isLoaded && (
+        <div className="space-y-2 text-sm text-vault-muted">
+          <p>Load saved preferences by approving a wallet message. This does not submit a transaction.</p>
+          <button
+            type="button"
+            onClick={() => performRequest("load")}
+            disabled={isBusy}
+            className="vq-btn-primary w-full disabled:opacity-60"
+          >
+            {pending === "load" ? "Loading preferences…" : "Load saved preferences"}
+          </button>
+        </div>
+      )}
+
       <div className="space-y-3 border-t border-vault-border pt-4">
         {TOGGLE_ROWS.map((row) => (
           <label
@@ -250,9 +214,10 @@ export default function VaultNotificationSettings({
             </div>
             <input
               type="checkbox"
-              checked={Boolean((isReady ? settings : DEFAULT_PREFS)[row.key])}
+              checked={Boolean(currentSettings[row.key])}
               onChange={() => toggleSetting(row.key)}
-              disabled={!isReady || isSaving}
+              disabled={!isLoaded || isBusy}
+              aria-label={row.title}
               className="h-5 w-5 rounded border-vault-border text-vault-accent focus:ring-2 focus:ring-vault-accent"
             />
           </label>
@@ -280,17 +245,16 @@ export default function VaultNotificationSettings({
       </div>
 
       <button
-        onClick={handleSave}
-        disabled={isSaving || !isReady}
+        type="button"
+        onClick={() => performRequest("save")}
+        disabled={isBusy || !isLoaded}
         className="vq-btn-primary w-full disabled:opacity-60"
       >
-        {wallet && !isReady
-          ? "Loading preferences…"
-          : isSaving ? "Saving…" : "Save Preferences"}
+        {pending === "save" ? "Saving…" : "Save Preferences"}
       </button>
 
-      {showSaved && isReady && (
-        <div className="flex items-center gap-2 text-sm text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3">
+      {showSaved && isLoaded && (
+        <div role="status" className="flex items-center gap-2 text-sm text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3">
           <CheckCircle2 size={16} />
           <span>
             Notification preferences saved
@@ -299,8 +263,12 @@ export default function VaultNotificationSettings({
         </div>
       )}
 
-      {error && isReady && (
-        <div className="flex items-start gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+      {cacheNotice && stateWallet === wallet && (
+        <p role="status" className="text-sm text-vault-muted">{cacheNotice}</p>
+      )}
+
+      {error && stateWallet === wallet && (
+        <div role="alert" className="flex items-start gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg p-3">
           <AlertCircle size={16} className="mt-0.5 shrink-0" />
           <span>{error}</span>
         </div>
