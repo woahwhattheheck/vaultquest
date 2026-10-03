@@ -87,3 +87,76 @@ Nine native request/read controls passed after the repair:
 The unchanged `SupportWidget.test.jsx` suite was included in one run but could not collect because the retained runtime lacks `nanostores`; that command had 26 passing store tests and one suite import failure. A subsequent store-only run exited successfully with all 26 tests. No widget pass is claimed for this continuation. Earlier UI evidence remains in `docs/TESTING.md` and was not replaced.
 
 There was no dependency installation or manifest/lockfile change. The full workspace unit suite, Next production build, full application route smoke tests, Playwright E2E, deployed intake and Node 20 matrix were not run with this partial retained runtime and the shared workspace capacity limit. The native curl evidence above is scoped to the real API handler and durable store.
+
+## Receipt recovery after an incomplete append
+
+This continuation starts from `cc01c56bb5aeda5562fbd34245a70f7c72900e3d` on the existing PR #218 branch. A file ending in valid JSON without a final newline, or in an interrupted JSON fragment, exposed another acceptance failure. The store appended the next record directly onto that tail and returned success. On reopening, the combined line could not be parsed, so the newly accepted receipt disappeared. A valid final receipt without a newline also disappeared when joined to the new record.
+
+The file store now remembers when the next append needs a leading newline. Startup derives that state from the existing bytes. Before an append, the store conservatively marks the boundary as uncertain and clears that state only after the write succeeds. A rejected append that left partial bytes therefore causes the next retry to start a separate line. The existing create queue serializes these operations.
+
+The correction appends a separator without rewriting or truncating existing content. Valid receipts remain recoverable; malformed fragments retain their bytes and continue to be skipped by the existing loader. Empty and already newline-terminated files keep their normal record layout. Receipt visibility still follows successful persistence, and the JSONL schema, duplicate identity, original timestamps, explicit-key policy, API responses and widget behavior are unchanged.
+
+### Store regressions
+
+Three cases were added to the maintained `lib/support-tickets.test.js` suite:
+
+- Preserve both receipts after appending to a valid final record without LF, including the original explicit-key replay.
+- Recover a new receipt appended after truncated JSON while retaining the earlier valid receipt and exact original byte prefix.
+- Reject an append that writes a real partial fragment before failing, then recover a successful same-key retry after reopening. The failed receipt remains absent, and subsequent replay returns the successfully persisted receipt.
+
+The original 26 tests passed before editing. All **29 tests pass** with the repair. Running those same 29 cases against the exact preceding store produced **3 failures and 26 passes**, covering each new scenario. Prior append-failure, concurrent-retry, startup-recovery, validation, rate-limit and restart-deduplication cases remain present and pass.
+
+The focused command uses the repository Vitest configuration and its existing setup file:
+
+```sh
+TMPDIR=/path/to/owned-temporary-directory node --max-old-space-size=192 \
+  node_modules/vitest/vitest.mjs run lib/support-tickets.test.js \
+  --maxWorkers=1 --minWorkers=1 --reporter=verbose
+
+node node_modules/eslint/bin/eslint.js lib/support-ticket-store.js lib/support-tickets.test.js
+node scripts/check-product-terms.js
+git diff --check
+```
+
+The focused ESLint, product-term and diff checks pass. Runtime versions are Node 24.19.0, Vitest 2.1.9, Vite 5.4.21, jsdom 25.0.1, ESLint 8.57.1 and `eslint-config-next` 14.2.33, reused through owned links to retained packages. No dependency was installed or changed.
+
+### Actual HTTP acceptance and restart readback
+
+The actual ticket route and store were bundled with esbuild 0.21.5. A thin HTTP adapter passed curl requests through real Next 14.2.33 `NextRequest` and `NextResponse`. Each POST and GET ran in a separate Node process, using the same isolated filesystem file within a scenario. All 12 request processes in each phase exited successfully. Only receipt randomness and the clock were controlled; route handling, validation, JSONL writes, parsing and responses executed normally.
+
+For each file condition, the flow created an original ticket, prepared the final-byte condition, submitted different valid content, then fetched both receipts after further process exits. The incomplete tail used the literal fragment `{"id":"interrupted`. All inputs were local illustrative fixtures.
+
+| Existing final bytes before the second POST | Second POST, before / after | Original GET before | New GET before | Original GET after | New GET after |
+| --- | --- | --- | --- | --- | --- |
+| Valid record with LF | 201 / 201 | 200 | 200 | 200 | 200 |
+| Valid record without LF | 201 / 201 | 404 | 404 | 200 | 200 |
+| Valid record with LF, then incomplete JSON | 201 / 201 | 200 | 404 | 200 | 200 |
+
+The existing bytes remained an exact prefix in every scenario. The separate direct-store probe also recovered both valid receipts in all three repaired scenarios.
+
+The second POST used this request (the adapter supplied an ephemeral local port):
+
+```sh
+curl --silent --show-error --max-time 10 \
+  -H 'content-type: application/json' \
+  --data-binary '{"name":"Ada Lovelace","email":"ada@example.com","category":"wallet","description":"Different local support fixture","idempotency_key":"next-form"}' \
+  "http://127.0.0.1:$PORT/api/support/tickets"
+```
+
+Both versions returned HTTP 201 with the same controlled receipt:
+
+```json
+{"data":{"id":"VQ-20261003-777777","status":"accepted","created_at":"2026-10-03T15:00:00.000Z","duplicate":false}}
+```
+
+After that process exited, a GET for `?id=VQ-20261003-777777` returned HTTP 404 on the preceding source for both incomplete-tail cases. With the repair, the fresh process returned HTTP 200:
+
+```json
+{"data":{"id":"VQ-20261003-777777","status":"accepted","created_at":"2026-10-03T15:00:00.000Z","category":"wallet"}}
+```
+
+### Boundary of this verification
+
+This is real filesystem and process-restart evidence for the existing single-host store. It does not establish coordination between independent writers, recovery of the malformed fragment itself, or power-loss durability. The partial-append regression injects an I/O rejection after writing actual bytes; it does not simulate a physical storage failure.
+
+The unchanged widget, full workspace suite, full Next application/build, route smoke/Playwright E2E, deployed intake and sponsor Node 20 matrix were not rerun for this store-only continuation. Earlier UI and API evidence remains above and in `docs/TESTING.md`. The previously documented workspace installation mismatch was not retried. Hosted CI and maintainer acceptance remain separate from these local results.
