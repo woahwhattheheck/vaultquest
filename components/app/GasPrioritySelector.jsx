@@ -44,6 +44,13 @@ export const PRIORITY_TIERS = [
   },
 ];
 
+const EMPTY_STELLAR_FEES = {
+  baseFeeStroops: STELLAR_FEE_CONFIG.fallbackBaseFeeStroops,
+  sourceLedger: null,
+  horizonUrl: null,
+  fetchedAt: null,
+};
+
 function formatUsd(value) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -73,12 +80,7 @@ export default function GasPrioritySelector({
   onChange,
 }) {
   const [priorityKey, setPriorityKey] = useState("medium");
-  const [stellarFees, setStellarFees] = useState({
-    baseFeeStroops: STELLAR_FEE_CONFIG.fallbackBaseFeeStroops,
-    sourceLedger: null,
-    horizonUrl: null,
-    fetchedAt: null,
-  });
+  const [stellarSample, setStellarSample] = useState(null);
   const [avalancheFees, setAvalancheFees] = useState({
     gasPriceWei: AVALANCHE_FEE_CONFIG.fallbackGasPriceWei,
     fetchedAt: null,
@@ -89,6 +91,16 @@ export default function GasPrioritySelector({
   const [feeNow, setFeeNow] = useState(() => Date.now());
 
   const isStellar = network === "stellar";
+  const stellarContext = useMemo(
+    () => ({ networkType, customHorizonUrl, isStellar, isUnsupported }),
+    [customHorizonUrl, isStellar, isUnsupported, networkType],
+  );
+  // Mask an earlier context during the render that changes the network/source,
+  // before effects can emit a callback or the matching request can complete.
+  const stellarFees =
+    stellarSample?.context === stellarContext
+      ? stellarSample.fees
+      : EMPTY_STELLAR_FEES;
   const tier = PRIORITY_TIERS.find((item) => item.key === priorityKey) ?? PRIORITY_TIERS[1];
   const nativeToken = isStellar
     ? STELLAR_FEE_CONFIG.nativeToken
@@ -115,11 +127,14 @@ export default function GasPrioritySelector({
           });
           if (cancelled) return;
           setFeeNow(Date.now());
-          setStellarFees({
-            baseFeeStroops: result.baseFeeStroops,
-            sourceLedger: result.sourceLedger,
-            horizonUrl: result.horizonUrl,
-            fetchedAt: result.fetchedAt,
+          setStellarSample({
+            context: stellarContext,
+            fees: {
+              baseFeeStroops: result.baseFeeStroops,
+              sourceLedger: result.sourceLedger,
+              horizonUrl: result.horizonUrl,
+              fetchedAt: result.fetchedAt,
+            },
           });
         } else {
           const result = await fetchAvalancheGasPrice();
@@ -132,11 +147,16 @@ export default function GasPrioritySelector({
       } catch (fetchError) {
         if (cancelled) return;
         if (isStellar) {
-          setStellarFees((prev) => ({
-            ...prev,
-            baseFeeStroops: STELLAR_FEE_CONFIG.fallbackBaseFeeStroops,
-            sourceLedger: null,
-            fetchedAt: new Date(),
+          setStellarSample((prev) => ({
+            context: stellarContext,
+            fees: {
+              ...(prev?.context === stellarContext
+                ? prev.fees
+                : EMPTY_STELLAR_FEES),
+              baseFeeStroops: STELLAR_FEE_CONFIG.fallbackBaseFeeStroops,
+              sourceLedger: null,
+              fetchedAt: new Date(),
+            },
           }));
         } else {
           setAvalancheFees({
@@ -154,7 +174,14 @@ export default function GasPrioritySelector({
     return () => {
       cancelled = true;
     };
-  }, [customHorizonUrl, isStellar, isUnsupported, networkType, refreshTick]);
+  }, [
+    customHorizonUrl,
+    isStellar,
+    isUnsupported,
+    networkType,
+    refreshTick,
+    stellarContext,
+  ]);
 
   useEffect(() => {
     if (!isStellar || isUnsupported || !stellarFees.sourceLedger || !stellarFees.fetchedAt) {

@@ -209,6 +209,300 @@ describe("GasPrioritySelector — Stellar fee isolation (#123)", () => {
     expect(lastCall.payload.chain).toBe("Avalanche C-Chain");
   });
 
+  describe("Stellar sample context", () => {
+    function response(ledger = 111111, baseFee = 120) {
+      return new Response(
+        JSON.stringify({ last_ledger: ledger, last_ledger_base_fee: baseFee }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    function heldResponse() {
+      let resolve;
+      let reject;
+      const promise = new Promise((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      return { promise, resolve, reject };
+    }
+
+    function latest(onChange) {
+      return onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    }
+
+    async function renderLoaded(props = {}) {
+      const onChange = vi.fn();
+      const view = render(
+        <GasPrioritySelector
+          nativeBalance={25}
+          {...props}
+          onChange={onChange}
+        />,
+      );
+      await waitFor(() => expect(latest(onChange).sourceLedger).toBe("111111"));
+      return { ...view, onChange };
+    }
+
+    function expectUnassigned(onChange, networkType = "testnet") {
+      expect(onChange).toHaveBeenCalled();
+      for (const [value] of onChange.mock.calls) {
+        expect(value).toMatchObject({
+          networkType,
+          sourceLedger: "fallback",
+          isStale: true,
+          payload: {
+            network: networkType,
+            sourceLedger: "fallback",
+            horizonUrl: null,
+            isStale: true,
+          },
+        });
+      }
+      expect(screen.getByTestId("metric-ledger")).toHaveTextContent(
+        "Fallback ledger",
+      );
+    }
+
+    it.each([
+      ["testnet", "mainnet"],
+      ["mainnet", "testnet"],
+    ])(
+      "clears %s attribution during the first %s render and every pending callback",
+      async (from, to) => {
+        const pending = heldResponse();
+        global.fetch = vi
+          .fn()
+          .mockResolvedValueOnce(response())
+          .mockReturnValueOnce(pending.promise);
+        const onChange = vi.fn();
+        const layouts = [];
+        function ObservedSelector({ networkType }) {
+          React.useLayoutEffect(() => {
+            layouts.push(screen.getByTestId("metric-ledger").textContent);
+          });
+          return (
+            <GasPrioritySelector
+              networkType={networkType}
+              nativeBalance={25}
+              onChange={onChange}
+            />
+          );
+        }
+        const view = render(<ObservedSelector networkType={from} />);
+        await waitFor(() =>
+          expect(latest(onChange).sourceLedger).toBe("111111"),
+        );
+        layouts.length = 0;
+        onChange.mockClear();
+        view.rerender(<ObservedSelector networkType={to} />);
+        expect(layouts).toEqual(["Fallback ledger"]);
+        expectUnassigned(onChange, to);
+        await act(async () => {
+          pending.resolve(response(222222, 220));
+        });
+        expect(latest(onChange)).toMatchObject({
+          networkType: to,
+          sourceLedger: "222222",
+          isStale: false,
+          payload: {
+            horizonUrl:
+              to === "mainnet"
+                ? "https://horizon.stellar.org"
+                : "https://horizon-testnet.stellar.org",
+          },
+        });
+      },
+    );
+
+    it("clears a custom Horizon sample until its replacement source responds", async () => {
+      const pending = heldResponse();
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(response())
+        .mockReturnValueOnce(pending.promise);
+      const { rerender, onChange } = await renderLoaded({
+        customHorizonUrl: "https://fee-a.example",
+      });
+      onChange.mockClear();
+      rerender(
+        <GasPrioritySelector
+          nativeBalance={25}
+          customHorizonUrl="https://fee-b.example"
+          onChange={onChange}
+        />,
+      );
+      expectUnassigned(onChange);
+      await act(async () => {
+        pending.resolve(response(222222));
+      });
+      expect(latest(onChange)).toMatchObject({
+        sourceLedger: "222222",
+        isStale: false,
+        payload: { horizonUrl: "https://fee-b.example", isStale: false },
+      });
+    });
+
+    it("does not attribute a failed new Horizon lookup to the preceding source", async () => {
+      const pending = heldResponse();
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(response())
+        .mockReturnValueOnce(pending.promise);
+      const { rerender, onChange } = await renderLoaded({
+        customHorizonUrl: "https://fee-a.example",
+      });
+      rerender(
+        <GasPrioritySelector
+          nativeBalance={25}
+          customHorizonUrl="https://fee-b.example"
+          onChange={onChange}
+        />,
+      );
+      onChange.mockClear();
+      await act(async () => {
+        pending.reject(new Error("New Horizon unavailable"));
+      });
+      expectUnassigned(onChange);
+      expect(screen.getByTestId("fee-warning-alert")).toHaveTextContent(
+        "New Horizon unavailable",
+      );
+    });
+
+    it("retains a valid sample during a refresh of the same context", async () => {
+      const pending = heldResponse();
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(response())
+        .mockReturnValueOnce(pending.promise);
+      const { onChange } = await renderLoaded();
+      const sample = latest(onChange);
+      fireEvent.click(screen.getByTestId("refresh-fees-btn"));
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(latest(onChange)).toEqual(sample);
+      expect(screen.getByTestId("metric-ledger")).toHaveTextContent("#111111");
+      await act(async () => {
+        pending.resolve(response(222222, 220));
+      });
+      expect(latest(onChange)).toMatchObject({
+        sourceLedger: "222222",
+        isStale: false,
+      });
+    });
+
+    it("requires a new matching response when returning to an earlier network context", async () => {
+      const mainnet = heldResponse();
+      const testnet = heldResponse();
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(response())
+        .mockReturnValueOnce(mainnet.promise)
+        .mockReturnValueOnce(testnet.promise);
+      const { rerender, onChange } = await renderLoaded();
+      rerender(
+        <GasPrioritySelector
+          nativeBalance={25}
+          networkType="mainnet"
+          onChange={onChange}
+        />,
+      );
+      onChange.mockClear();
+      rerender(
+        <GasPrioritySelector
+          nativeBalance={25}
+          networkType="testnet"
+          onChange={onChange}
+        />,
+      );
+      expectUnassigned(onChange);
+      await act(async () => {
+        mainnet.resolve(response(222222));
+      });
+      expectUnassigned(onChange);
+      await act(async () => {
+        testnet.resolve(response(333333));
+      });
+      expect(latest(onChange)).toMatchObject({
+        networkType: "testnet",
+        sourceLedger: "333333",
+        isStale: false,
+      });
+    });
+
+    it.each(["success", "failure"])(
+      "ignores a cancelled old-context %s after the new sample loads",
+      async (outcome) => {
+        const oldRequest = heldResponse();
+        const currentRequest = heldResponse();
+        global.fetch = vi
+          .fn()
+          .mockResolvedValueOnce(response())
+          .mockReturnValueOnce(oldRequest.promise)
+          .mockReturnValueOnce(currentRequest.promise);
+        const { rerender, onChange } = await renderLoaded();
+        rerender(
+          <GasPrioritySelector
+            nativeBalance={25}
+            networkType="mainnet"
+            onChange={onChange}
+          />,
+        );
+        rerender(
+          <GasPrioritySelector
+            nativeBalance={25}
+            networkType="mainnet"
+            customHorizonUrl="https://current.example"
+            onChange={onChange}
+          />,
+        );
+        await act(async () => {
+          currentRequest.resolve(response(333333));
+        });
+        const sample = latest(onChange);
+        const calls = onChange.mock.calls.length;
+        await act(async () => {
+          if (outcome === "success") oldRequest.resolve(response(222222));
+          else oldRequest.reject(new Error("Old source failure"));
+        });
+        expect(onChange).toHaveBeenCalledTimes(calls);
+        expect(latest(onChange)).toEqual(sample);
+        expect(sample).toMatchObject({
+          sourceLedger: "333333",
+          payload: { horizonUrl: "https://current.example" },
+        });
+        expect(screen.queryByTestId("fee-warning-alert")).toBeNull();
+      },
+    );
+
+    it("does not reactivate a sample from the preceding supported context", async () => {
+      const pending = heldResponse();
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(response())
+        .mockReturnValueOnce(pending.promise);
+      const { rerender, onChange } = await renderLoaded();
+      rerender(
+        <GasPrioritySelector
+          nativeBalance={25}
+          isUnsupported
+          onChange={onChange}
+        />,
+      );
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      onChange.mockClear();
+      rerender(<GasPrioritySelector nativeBalance={25} onChange={onChange} />);
+      expectUnassigned(onChange);
+      await act(async () => {
+        pending.resolve(response(222222));
+      });
+      expect(latest(onChange)).toMatchObject({
+        sourceLedger: "222222",
+        isStale: false,
+        isUnsupported: false,
+      });
+    });
+  });
+
   describe("Stellar fee expiry while mounted", () => {
     async function renderTimedSelector(props = {}) {
       vi.useFakeTimers();
