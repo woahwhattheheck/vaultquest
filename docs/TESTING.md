@@ -33,13 +33,14 @@ Route smoke tests live in `e2e/route-smoke.spec.ts`. They cover the initial crit
 - `/app` — app dashboard in a disconnected-wallet state
 - `/app/prizes` — prizes index in a disconnected-wallet state
 - `/app/vaults` — vaults index in a disconnected-wallet state
+- `/app/admin/settings` — admin settings overview in a disconnected-wallet state
 
 The app-route tests clear browser storage, mock common wallet globals as disconnected, and fulfill `/api/*` requests with empty fixture data so route-level provider, import, and render failures surface consistently. Test names include the route path so CI failures identify the regressed route.
 
-Run only the route smoke tests:
+From the repository root, run only the route smoke tests with the existing Playwright CLI:
 
 ```bash
-pnpm run test:smoke:routes
+pnpm exec playwright test e2e/route-smoke.spec.ts
 ```
 
 ### E2E & Quality Gates (Playwright)
@@ -130,5 +131,5 @@ The full application build, full workspace test suite, full Playwright suite,
 hosted CI, and deployed intake were not exercised for this repair. A frozen
 workspace installation failed because `backend/package.json` specifies
 `@sendgrid/mail@^8.1.0` and `@stellar/stellar-sdk@^12.3.0` without matching lockfile
-entries. The documented `test:smoke:routes` script is also absent from the current
-root `package.json`. No dependency manifests or lockfiles were changed here.
+entries. The root `package.json` has no `test:smoke:routes` script; use the direct
+Playwright command above. No dependency manifests or lockfiles were changed here.
