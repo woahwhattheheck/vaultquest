@@ -81,7 +81,7 @@ describe("InMemoryJobLeaseStore", () => {
     expect(renew2.renewed).toBe(true);
   });
 
-  it("same owner reacquire bumps fence (restart safety)", async () => {
+  it("does not let a duplicate owner ID replace a live worker", async () => {
     const store = new InMemoryJobLeaseStore();
     const t0 = new Date("2026-09-25T00:00:00.000Z");
     const a = await store.tryAcquire("job-a", "owner-1", 5_000, t0);
@@ -89,11 +89,11 @@ describe("InMemoryJobLeaseStore", () => {
     if (!a.acquired) return;
 
     const b = await store.tryAcquire("job-a", "owner-1", 5_000, t0);
-    expect(b.acquired).toBe(true);
-    if (!b.acquired) return;
-    expect(b.fenceToken).toBe(a.fenceToken + BigInt(1));
-
-    const staleRenew = await store.renew("job-a", "owner-1", a.fenceToken, 5_000, t0);
+    expect(b.acquired).toBe(false);
+    const replacement = await store.tryAcquire("job-a", "owner-1", 5_000, new Date(t0.getTime() + 5_001));
+    expect(replacement.acquired).toBe(true);
+    if (replacement.acquired) expect(replacement.fenceToken).toBe(a.fenceToken + BigInt(1));
+    const staleRenew = await store.renew("job-a", "owner-1", a.fenceToken, 5_000, new Date(t0.getTime() + 5_001));
     expect(staleRenew.renewed).toBe(false);
   });
 });
@@ -245,6 +245,28 @@ describe("JobLeaseService.runWithLease", () => {
 
     const result = await resultPromise;
     expect(result.status).toBe("fence_lost");
+  });
+
+  it("rejects a stale effect before the next heartbeat observes takeover", async () => {
+    const store = new InMemoryJobLeaseStore();
+    const clock = makeClock(Date.parse("2026-09-25T00:00:00.000Z"));
+    const a = new JobLeaseService({ logger, store, ownerId: "a", ttlMs: 1_000, heartbeatMs: 60_000, now: clock.now });
+    const b = new JobLeaseService({ logger, store, ownerId: "b", ttlMs: 1_000, heartbeatMs: 60_000, now: clock.now });
+    const commit = vi.fn(async () => undefined);
+    const result = await a.runWithLease("job", async (lease) => {
+      clock.advance(1_001);
+      expect((await b.runWithLease("job", async () => undefined)).status).toBe("ran");
+      await expect(lease.withFence(commit)).rejects.toThrow("no longer current");
+      expect(lease.signal.aborted).toBe(true);
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(result.status).toBe("fence_lost");
+  });
+
+  it("cannot report success after expiry even without a replacement or heartbeat", async () => {
+    const clock = makeClock(Date.parse("2026-09-25T00:00:00.000Z"));
+    const svc = new JobLeaseService({ logger, store: new InMemoryJobLeaseStore(), ttlMs: 1_000, heartbeatMs: 60_000, now: clock.now });
+    expect((await svc.runWithLease("job", async () => clock.advance(1_001))).status).toBe("fence_lost");
   });
 
   it("releases leases on shutdown so another replica can acquire", async () => {

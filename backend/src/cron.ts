@@ -10,7 +10,7 @@ import {
 } from "./services/backupService.js";
 import type { StellarIndexer } from "./services/stellarIndexer.js";
 import { pingDatabase } from "./db.js";
-import type { JobLeaseService } from "./services/jobLeaseService.js";
+import type { JobLeaseContext, JobLeaseService } from "./services/jobLeaseService.js";
 
 export const JOB_RECONCILER = "cron:reconciler";
 export const JOB_QUEST = "cron:quest";
@@ -27,15 +27,15 @@ async function withOptionalLease(
   leases: JobLeaseService | undefined,
   jobName: string,
   logger: Logger,
-  work: () => Promise<void>
+  work: (lease?: JobLeaseContext) => Promise<void>
 ): Promise<void> {
   if (!leases) {
     await work();
     return;
   }
-  const result = await leases.runWithLease(jobName, async ({ signal }) => {
-    if (signal.aborted) return;
-    await work();
+  const result = await leases.runWithLease(jobName, async (lease) => {
+    lease.signal.throwIfAborted();
+    await work(lease);
   });
   if (result.status === "skipped") {
     logger.info({ jobName, reason: result.reason }, "cron tick skipped: lease not held");
@@ -52,11 +52,12 @@ export function startReconcilerCron(opts: {
 } & LeaseOpts): cron.ScheduledTask {
   const schedule = opts.schedule ?? "*/1 * * * *";
   const task = cron.schedule(schedule, async () => {
-    await withOptionalLease(opts.leases, JOB_RECONCILER, opts.logger, async () => {
+    await withOptionalLease(opts.leases, JOB_RECONCILER, opts.logger, async (lease) => {
       try {
-        const result = await sweepOrphans(opts.prisma, { ttlMinutes: opts.ttlMinutes });
+        const result = await sweepOrphans(opts.prisma, { ttlMinutes: opts.ttlMinutes }, lease);
         opts.logger.info({ result }, "reconciler sweep complete");
       } catch (err) {
+        lease?.signal.throwIfAborted();
         opts.logger.error({ err }, "reconciler sweep failed");
       }
     });
@@ -80,12 +81,13 @@ export function startQuestCron(opts: {
   const questService = new QuestService(opts.prisma);
 
   const task = cron.schedule(schedule, async () => {
-    await withOptionalLease(opts.leases, JOB_QUEST, opts.logger, async () => {
+    await withOptionalLease(opts.leases, JOB_QUEST, opts.logger, async (lease) => {
       const since = new Date(Date.now() - lookbackMinutes * 60 * 1000);
       try {
-        const result = await questService.evaluateRecent(since);
+        const result = await questService.evaluateRecent(since, 500, lease);
         opts.logger.info({ result }, "quest evaluation sweep complete");
       } catch (err) {
+        lease?.signal.throwIfAborted();
         opts.logger.error({ err }, "quest evaluation sweep failed");
       }
     });
@@ -107,15 +109,16 @@ export function startIndexerCron(opts: {
 } & LeaseOpts): cron.ScheduledTask {
   const schedule = opts.schedule ?? "*/1 * * * *";
   const task = cron.schedule(schedule, async () => {
-    await withOptionalLease(opts.leases, JOB_INDEXER, opts.logger, async () => {
+    await withOptionalLease(opts.leases, JOB_INDEXER, opts.logger, async (lease) => {
       try {
         if (!(await pingDatabase(opts.prisma))) {
           opts.logger.warn({}, "indexer tick skipped: database unreachable");
           return;
         }
-        const result = await opts.indexer.tick();
+        const result = await opts.indexer.tick(lease);
         opts.logger.info({ result }, "indexer tick complete");
       } catch (err) {
+        lease?.signal.throwIfAborted();
         opts.logger.error({ err }, "indexer tick failed");
       }
     });
@@ -154,11 +157,12 @@ export function startBackupCron(opts: {
   });
 
   const task = cron.schedule(schedule, async () => {
-    await withOptionalLease(opts.leases, JOB_BACKUP, opts.logger, async () => {
+    await withOptionalLease(opts.leases, JOB_BACKUP, opts.logger, async (lease) => {
       try {
-        const result = await svc.run();
+        const result = await svc.run(lease);
         opts.logger.info({ result }, "backup: completed");
       } catch (err) {
+        lease?.signal.throwIfAborted();
         opts.logger.error({ err }, "backup: failed");
       }
     });
@@ -191,15 +195,16 @@ export function startRestoreDrillCron(opts: {
   });
 
   const task = cron.schedule(schedule, async () => {
-    await withOptionalLease(opts.leases, JOB_RESTORE_DRILL, opts.logger, async () => {
+    await withOptionalLease(opts.leases, JOB_RESTORE_DRILL, opts.logger, async (lease) => {
       try {
-        const result = await svc.runRestoreDrill();
+        const result = await svc.runRestoreDrill({}, lease);
         if (!result.success) {
           opts.logger.error({ result }, "restore verification drill failed");
         } else {
           opts.logger.info({ result }, "restore verification drill completed successfully");
         }
       } catch (err) {
+        lease?.signal.throwIfAborted();
         opts.logger.error({ err }, "restore verification drill errored out");
       }
     });

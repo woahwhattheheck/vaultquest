@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import type { Logger } from "pino";
 
 export type LeaseAcquisition =
@@ -15,6 +15,33 @@ export interface JobLeaseStore {
   tryAcquire(jobName: string, ownerId: string, ttlMs: number, now?: Date): Promise<LeaseAcquisition>;
   renew(jobName: string, ownerId: string, fenceToken: bigint, ttlMs: number, now?: Date): Promise<LeaseRenewal>;
   release(jobName: string, ownerId: string, fenceToken: bigint): Promise<boolean>;
+  runFenced<T>(
+    jobName: string,
+    ownerId: string,
+    fenceToken: bigint,
+    signal: AbortSignal,
+    work: (tx?: Prisma.TransactionClient) => Promise<T>,
+    now?: () => Date
+  ): Promise<T>;
+}
+
+export class LeaseLostError extends Error {
+  constructor(jobName: string) {
+    super(`Job lease is no longer current: ${jobName}`);
+    this.name = "LeaseLostError";
+  }
+}
+
+export interface JobLeaseContext {
+  jobName: string;
+  ownerId: string;
+  fenceToken: bigint;
+  signal: AbortSignal;
+  assertCurrent(): Promise<void>;
+  /** Serializes a short external effect with lease handoff; not a remote transaction. */
+  withFence<T>(work: () => Promise<T>): Promise<T>;
+  /** All database writes must use this transaction's client, never the outer client. */
+  transaction<T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T>;
 }
 
 export type RunWithLeaseResult<T> =
@@ -79,7 +106,7 @@ export class JobLeaseService {
   /** In-process overlap guard + distributed lease for a named job tick. */
   async runWithLease<T>(
     jobName: string,
-    work: (ctx: { fenceToken: bigint; signal: AbortSignal; ownerId: string }) => Promise<T>
+    work: (ctx: JobLeaseContext) => Promise<T>
   ): Promise<RunWithLeaseResult<T>> {
     if (this.shuttingDown) {
       return { status: "skipped", reason: "shutting_down" };
@@ -116,6 +143,31 @@ export class JobLeaseService {
     }
 
     const abort = new AbortController();
+    const fenced = async <V>(fn: (tx?: Prisma.TransactionClient) => Promise<V>): Promise<V> => {
+      try {
+        abort.signal.throwIfAborted();
+        return await this.store.runFenced(
+          jobName, this.ownerId, acquisition.fenceToken, abort.signal, fn, this.now
+        );
+      } catch (error) {
+        // A failed ownership check or uncertain transaction must stop this run,
+        // including callers whose error-isolation code catches the rejection.
+        abort.abort(error);
+        throw error;
+      }
+    };
+    const context: JobLeaseContext = {
+      jobName,
+      ownerId: this.ownerId,
+      fenceToken: acquisition.fenceToken,
+      signal: abort.signal,
+      assertCurrent: () => fenced(async () => undefined),
+      withFence: (fn) => fenced(() => fn()),
+      transaction: (fn) => fenced((tx) => {
+        if (!tx) throw new Error("Database fencing requires a PostgreSQL lease store");
+        return fn(tx);
+      })
+    };
     const heartbeat = setInterval(() => {
       void this.heartbeat(jobName, acquisition.fenceToken, abort);
     }, this.heartbeatMs);
@@ -125,14 +177,11 @@ export class JobLeaseService {
     this.active.set(jobName, { fenceToken: acquisition.fenceToken, heartbeat, abort });
 
     try {
-      const value = await work({
-        fenceToken: acquisition.fenceToken,
-        signal: abort.signal,
-        ownerId: this.ownerId
-      });
+      const value = await work(context);
       if (abort.signal.aborted) {
         return { status: "fence_lost" };
       }
+      await context.assertCurrent();
       return { status: "ran", value, fenceToken: acquisition.fenceToken };
     } catch (error) {
       if (abort.signal.aborted) {
@@ -172,11 +221,11 @@ export class JobLeaseService {
       const result = await this.store.renew(jobName, this.ownerId, fenceToken, this.ttlMs, this.now());
       if (!result.renewed) {
         this.logger.warn({ jobName, reason: result.reason, fenceToken: fenceToken.toString() }, "job lease fence lost");
-        abort.abort();
+        abort.abort(new LeaseLostError(jobName));
       }
     } catch (err) {
       this.logger.warn({ err, jobName }, "job lease heartbeat failed");
-      abort.abort();
+      abort.abort(new LeaseLostError(jobName));
     }
   }
 }
@@ -194,61 +243,38 @@ export class PrismaJobLeaseStore implements JobLeaseStore {
     jobName: string,
     ownerId: string,
     ttlMs: number,
-    now: Date = new Date()
+    _now?: Date
   ): Promise<LeaseAcquisition> {
-    const expiresAt = new Date(now.getTime() + ttlMs);
-
-    // Fast path: insert when absent.
+    // Use the database clock for every replica. A fast host clock must not
+    // steal a live lease; a restarted process must not reuse a live owner ID.
     try {
-      const created = await this.prisma.jobLease.create({
-        data: {
-          jobName,
-          ownerId,
-          fenceToken: BigInt(1),
-          expiresAt,
-          heartbeatAt: now
-        }
-      });
-      return { acquired: true, fenceToken: created.fenceToken, ownerId, expiresAt: created.expiresAt };
-    } catch (err: any) {
-      // Unique violation → fall through to steal/reacquire path.
-      if (err?.code !== "P2002") {
-        return { acquired: false, reason: "store_error" };
+      const rows = await this.prisma.$queryRaw<
+        Array<{ owner_id: string; fence_token: bigint; expires_at: Date }>
+      >`
+        INSERT INTO job_leases
+          (job_name, owner_id, fence_token, expires_at, heartbeat_at, updated_at)
+        VALUES (${jobName}, ${ownerId}, 1,
+          clock_timestamp() + ${ttlMs} * interval '1 millisecond',
+          clock_timestamp(), clock_timestamp())
+        ON CONFLICT (job_name) DO UPDATE SET
+          owner_id = EXCLUDED.owner_id,
+          fence_token = job_leases.fence_token + 1,
+          expires_at = clock_timestamp() + ${ttlMs} * interval '1 millisecond',
+          heartbeat_at = clock_timestamp(),
+          updated_at = clock_timestamp()
+        WHERE job_leases.expires_at <= clock_timestamp()
+        RETURNING owner_id, fence_token, expires_at
+      `;
+      const row = rows[0];
+      if (row) {
+        return { acquired: true, ownerId: row.owner_id,
+          fenceToken: row.fence_token, expiresAt: row.expires_at };
       }
+      const held = await this.prisma.jobLease.findUnique({ where: { jobName } });
+      return { acquired: false, reason: "held_by_other", holder: held?.ownerId };
+    } catch {
+      return { acquired: false, reason: "store_error" };
     }
-
-    // Steal when expired, or renew fence when we already own it (process restart).
-    const rows = await this.prisma.$queryRaw<
-      Array<{ owner_id: string; fence_token: bigint; expires_at: Date }>
-    >`
-      UPDATE job_leases
-      SET
-        owner_id = ${ownerId},
-        fence_token = fence_token + 1,
-        expires_at = ${expiresAt},
-        heartbeat_at = ${now},
-        updated_at = ${now}
-      WHERE job_name = ${jobName}
-        AND (expires_at < ${now} OR owner_id = ${ownerId})
-      RETURNING owner_id, fence_token, expires_at
-    `;
-
-    const row = rows[0];
-    if (row) {
-      return {
-        acquired: true,
-        fenceToken: row.fence_token,
-        ownerId: row.owner_id,
-        expiresAt: row.expires_at
-      };
-    }
-
-    const held = await this.prisma.jobLease.findUnique({ where: { jobName } });
-    return {
-      acquired: false,
-      reason: "held_by_other",
-      holder: held?.ownerId
-    };
   }
 
   async renew(
@@ -256,29 +282,50 @@ export class PrismaJobLeaseStore implements JobLeaseStore {
     ownerId: string,
     fenceToken: bigint,
     ttlMs: number,
-    now: Date = new Date()
+    _now?: Date
   ): Promise<LeaseRenewal> {
-    const expiresAt = new Date(now.getTime() + ttlMs);
-    const result = await this.prisma.jobLease.updateMany({
-      where: {
-        jobName,
-        ownerId,
-        fenceToken,
-        expiresAt: { gte: now }
-      },
-      data: {
-        expiresAt,
-        heartbeatAt: now
-      }
-    });
-    if (result.count === 1) {
-      return { renewed: true, expiresAt };
-    }
-    const current = await this.prisma.jobLease.findUnique({ where: { jobName } });
-    if (!current || current.expiresAt < now) {
-      return { renewed: false, reason: "expired" };
-    }
+    const rows = await this.prisma.$queryRaw<Array<{ expires_at: Date }>>`
+      UPDATE job_leases
+      SET expires_at = clock_timestamp() + ${ttlMs} * interval '1 millisecond',
+          heartbeat_at = clock_timestamp(), updated_at = clock_timestamp()
+      WHERE job_name = ${jobName} AND owner_id = ${ownerId}
+        AND fence_token = ${fenceToken} AND expires_at > clock_timestamp()
+      RETURNING expires_at
+    `;
+    if (rows[0]) return { renewed: true, expiresAt: rows[0].expires_at };
     return { renewed: false, reason: "lost_fence" };
+  }
+
+  async runFenced<T>(
+    jobName: string,
+    ownerId: string,
+    fenceToken: bigint,
+    signal: AbortSignal,
+    work: (tx?: Prisma.TransactionClient) => Promise<T>
+  ): Promise<T> {
+    signal.throwIfAborted();
+    return this.prisma.$transaction(async (tx) => {
+      // Lock first, then check time in a separate statement: a lock wait must
+      // not preserve an expiry value evaluated before another writer finished.
+      await tx.$queryRaw`
+        SELECT job_name FROM job_leases WHERE job_name = ${jobName} FOR UPDATE
+      `;
+      const assertCurrent = async () => {
+        signal.throwIfAborted();
+        const rows = await tx.$queryRaw<Array<{ job_name: string }>>`
+          SELECT job_name FROM job_leases
+          WHERE job_name = ${jobName} AND owner_id = ${ownerId}
+            AND fence_token = ${fenceToken} AND expires_at > clock_timestamp()
+        `;
+        if (rows.length !== 1) throw new LeaseLostError(jobName);
+      };
+      await assertCurrent();
+      const value = await work(tx);
+      // A transaction that outlives its lease, or an aborted run, rolls back
+      // all domain writes. A successor cannot change the fence while locked.
+      await assertCurrent();
+      return value;
+    });
   }
 
   async release(jobName: string, ownerId: string, fenceToken: bigint): Promise<boolean> {
@@ -310,7 +357,7 @@ export class InMemoryJobLeaseStore implements JobLeaseStore {
   ): Promise<LeaseAcquisition> {
     const nowMs = now.getTime();
     const existing = this.leases.get(jobName);
-    if (existing && existing.expiresAt >= nowMs && existing.ownerId !== ownerId) {
+    if (existing && existing.expiresAt > nowMs) {
       return { acquired: false, reason: "held_by_other", holder: existing.ownerId };
     }
     const fenceToken = existing ? existing.fenceToken + BigInt(1) : BigInt(1);
@@ -329,7 +376,7 @@ export class InMemoryJobLeaseStore implements JobLeaseStore {
     const nowMs = now.getTime();
     const existing = this.leases.get(jobName);
     if (!existing) return { renewed: false, reason: "expired" };
-    if (existing.expiresAt < nowMs) return { renewed: false, reason: "expired" };
+    if (existing.expiresAt <= nowMs) return { renewed: false, reason: "expired" };
     if (existing.ownerId !== ownerId || existing.fenceToken !== fenceToken) {
       return { renewed: false, reason: "lost_fence" };
     }
@@ -346,6 +393,29 @@ export class InMemoryJobLeaseStore implements JobLeaseStore {
     existing.ownerId = "";
     existing.expiresAt = 0;
     return true;
+  }
+
+  async runFenced<T>(
+    jobName: string,
+    ownerId: string,
+    fenceToken: bigint,
+    signal: AbortSignal,
+    work: (tx?: Prisma.TransactionClient) => Promise<T>,
+    now: () => Date = () => new Date()
+  ): Promise<T> {
+    signal.throwIfAborted();
+    const current = this.leases.get(jobName);
+    if (!current || current.ownerId !== ownerId || current.fenceToken !== fenceToken ||
+        current.expiresAt <= now().getTime()) {
+      throw new LeaseLostError(jobName);
+    }
+    // The memory store exercises ownership/cancellation logic only. It has
+    // no database transaction client and cannot prove PostgreSQL row locking.
+    const value = await work();
+    signal.throwIfAborted();
+    if (this.leases.get(jobName) !== current || current.ownerId !== ownerId ||
+        current.fenceToken !== fenceToken || current.expiresAt <= now().getTime()) throw new LeaseLostError(jobName);
+    return value;
   }
 
   /** Test helper: inspect current lease. */

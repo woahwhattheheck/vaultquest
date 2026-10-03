@@ -34,15 +34,8 @@ const app = buildApp({
   cacheService
 });
 
-// Periodic write-behind sync task: sync checkpoint from cache to PostgreSQL database every 15 seconds
-const cacheSyncInterval = setInterval(async () => {
-  try {
-    await cacheService.syncCheckpointToDb();
-  } catch (err) {
-    logger.error({ err }, "failed to sync indexer checkpoint from cache");
-  }
-}, 15000);
-cacheSyncInterval.unref();
+// Indexer checkpoints commit in the lease-fenced database transaction. There
+// must be no later, unleased Redis write-behind that can overwrite a new owner.
 
 const cronTask = startReconcilerCron({
   prisma,
@@ -87,7 +80,6 @@ if (env.BACKUP_DIR) {
 
 async function shutdown(signal: string) {
   logger.info({ signal }, "shutting down");
-  clearInterval(cacheSyncInterval);
   cronTask.stop();
   questCronTask.stop();
   indexerCronTask?.stop();
