@@ -72,6 +72,54 @@ describe("validateIndexerConfig", () => {
     expect(fetchNetwork).toHaveBeenCalledWith("https://soroban-testnet.stellar.org");
   });
 
+  it.each([" Private VaultQuest network", "Private VaultQuest network "])(
+    "preserves the exact matching passphrase %j in validation and health metadata",
+    async (passphrase) => {
+      const config = await validateIndexerConfig({
+        rpcUrl: "https://soroban-private.example",
+        contractIdsRaw: C1,
+        expectedNetworkPassphrase: passphrase,
+        fetchNetwork: async () => ({ passphrase, protocolVersion: "23" })
+      });
+
+      expect(config.network.passphrase).toBe(passphrase);
+      expect(toIndexerHealthMeta(config).network?.passphrase).toBe(passphrase);
+    }
+  );
+
+  it.each([" Private VaultQuest network", "Private VaultQuest network "])(
+    "rejects a different RPC network obtained by trimming %j",
+    async (passphrase) => {
+      await expect(
+        validateIndexerConfig({
+          rpcUrl: "https://soroban-private.example",
+          contractIdsRaw: C1,
+          expectedNetworkPassphrase: passphrase,
+          fetchNetwork: async () => ({
+            passphrase: passphrase.trim(),
+            protocolVersion: "23"
+          })
+        })
+      ).rejects.toMatchObject({ code: "SOROBAN_RPC_NETWORK_MISMATCH" });
+    }
+  );
+
+  it("still rejects whitespace-only passphrases before probing the RPC", async () => {
+    const fetchNetwork = vi.fn(async () => ({
+      passphrase: "   ",
+      protocolVersion: "23"
+    }));
+    await expect(
+      validateIndexerConfig({
+        rpcUrl: "https://soroban-private.example",
+        contractIdsRaw: C1,
+        expectedNetworkPassphrase: "   ",
+        fetchNetwork
+      })
+    ).rejects.toMatchObject({ code: "SOROBAN_NETWORK_PASSPHRASE_MISSING" });
+    expect(fetchNetwork).not.toHaveBeenCalled();
+  });
+
   it("rejects RPC network mismatch", async () => {
     await expect(
       validateIndexerConfig({

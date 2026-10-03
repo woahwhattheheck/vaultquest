@@ -115,8 +115,9 @@ export type ValidateIndexerConfigInput = {
 export async function validateIndexerConfig(
   input: ValidateIndexerConfigInput
 ): Promise<ValidatedIndexerConfig> {
-  const expected = input.expectedNetworkPassphrase?.trim();
-  if (!expected) {
+  // Network identity includes the full passphrase; trim only to reject blanks.
+  const expected = input.expectedNetworkPassphrase;
+  if (!expected?.trim()) {
     throw new IndexerConfigError(
       "SOROBAN_NETWORK_PASSPHRASE is required when the indexer is enabled",
       "SOROBAN_NETWORK_PASSPHRASE_MISSING"

@@ -13,6 +13,11 @@ Before the indexer worker starts, the backend:
 2. Requires `SOROBAN_NETWORK_PASSPHRASE` and calls Soroban RPC `getNetwork` against `SOROBAN_RPC_URL`.
 3. Refuses to start (process exit) when the RPC passphrase does not match, or when contract IDs are invalid.
 
+The configured passphrase must match the RPC's full passphrase exactly. Leading
+or trailing whitespace is part of the network identity and is not trimmed for
+comparison. Empty or whitespace-only configuration still fails before the RPC
+probe. Whitespace around comma-separated contract IDs continues to be ignored.
+
 `GET /health/indexer` includes the validated set:
 
 ```json
