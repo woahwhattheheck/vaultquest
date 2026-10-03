@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bell, CheckCircle2, AlertCircle, ShieldCheck } from "lucide-react";
 import {
   connectedPublicKey,
@@ -68,20 +68,27 @@ export default function VaultNotificationSettings({
   const [error, setError] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
   const [loadedWallet, setLoadedWallet] = useState("");
+  const walletSession = useRef(null);
+  const isReady = Boolean(wallet) && loadedWallet === wallet;
 
-  const hydrate = useCallback(
-    async (nextWallet) => {
-      setError(null);
-      setShowSaved(false);
+  useEffect(() => {
+    const session = { wallet: wallet || "", active: true, saving: false };
+    walletSession.current = session;
+    const controller = new AbortController();
+    let timeout;
+    const isCurrent = () => session.active && walletSession.current === session;
 
-      if (!nextWallet) {
-        setSettings({ ...DEFAULT_PREFS });
-        setLoadedWallet("");
-        return;
-      }
+    setLoadedWallet("");
+    setSettings({ ...DEFAULT_PREFS });
+    setError(null);
+    setShowSaved(false);
+    setIsSaving(false);
+
+    async function hydrate() {
+      if (!session.wallet) return;
 
       if (browserStorage) {
-        const local = loadNotificationPrefs(browserStorage, nextWallet);
+        const local = loadNotificationPrefs(browserStorage, session.wallet);
         if (local.ok && local.record) {
           setSettings({ ...DEFAULT_PREFS, ...local.record.prefs });
         } else if (!local.ok && local.reason === "newer-version") {
@@ -96,47 +103,69 @@ export default function VaultNotificationSettings({
       }
 
       if (doFetch) {
+        timeout = setTimeout(() => controller.abort(), 5000);
         try {
           const res = await doFetch(
-            `/api/notification-prefs?wallet=${encodeURIComponent(nextWallet)}`,
-            { signal: AbortSignal.timeout(5000) },
+            `/api/notification-prefs?wallet=${encodeURIComponent(session.wallet)}`,
+            { signal: controller.signal },
           );
+          if (!isCurrent()) return;
           if (res.ok) {
             const json = await res.json();
-            if (json?.data?.prefs) {
+            if (isCurrent() && json?.data?.prefs) {
               setSettings({ ...DEFAULT_PREFS, ...json.data.prefs, securityNotices: true });
             }
           }
         } catch {
           // Local prefs remain authoritative if the server is unreachable.
+        } finally {
+          clearTimeout(timeout);
         }
       }
 
-      setLoadedWallet(nextWallet);
-    },
-    [browserStorage, doFetch],
-  );
+      if (isCurrent()) setLoadedWallet(session.wallet);
+    }
 
-  useEffect(() => {
-    hydrate(wallet || "");
-  }, [wallet, hydrate]);
+    void hydrate();
+    return () => {
+      // Cancel reads and invalidate completions, including a switch back to
+      // the same wallet while an older request is still in flight.
+      session.active = false;
+      controller.abort();
+      clearTimeout(timeout);
+    };
+  }, [wallet, browserStorage, doFetch]);
 
   const toggleSetting = (key) => {
-    if (!OPTIONAL_PREF_KEYS.includes(key)) return;
+    if (
+      !isReady ||
+      isSaving ||
+      walletSession.current?.saving ||
+      !OPTIONAL_PREF_KEYS.includes(key)
+    ) return;
     setSettings((prev) => ({ ...prev, [key]: !prev[key] }));
     setShowSaved(false);
     setError(null);
   };
 
   const handleSave = async () => {
-    setError(null);
-    setShowSaved(false);
-
     if (!wallet) {
       setError("Connect a wallet to save notification preferences.");
       return;
     }
 
+    const session = walletSession.current;
+    if (
+      !isReady ||
+      !session?.active ||
+      session.wallet !== wallet ||
+      session.saving
+    ) return;
+    session.saving = true;
+    const isCurrent = () => session.active && walletSession.current === session;
+
+    setError(null);
+    setShowSaved(false);
     setIsSaving(true);
     try {
       if (browserStorage) {
@@ -167,6 +196,7 @@ export default function VaultNotificationSettings({
           }),
           signal: AbortSignal.timeout(8000),
         });
+        if (!isCurrent()) return;
         if (!res.ok) {
           setError("Preferences were saved on this device, but the server copy failed. Retry when online.");
           // Still treat local save as partial success indicator? Prefer honest error.
@@ -174,17 +204,22 @@ export default function VaultNotificationSettings({
         }
       }
 
-      setShowSaved(true);
-      setLoadedWallet(wallet);
+      if (isCurrent()) setShowSaved(true);
     } catch {
-      setError("Preferences could not be saved right now. Try again.");
+      if (isCurrent()) {
+        setError("Preferences could not be saved right now. Try again.");
+      }
     } finally {
-      setIsSaving(false);
+      session.saving = false;
+      if (isCurrent()) setIsSaving(false);
     }
   };
 
   return (
-    <section className="vq-glass-hover p-6 space-y-4">
+    <section
+      className="vq-glass-hover p-6 space-y-4"
+      aria-busy={Boolean(wallet) && (!isReady || isSaving)}
+    >
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-vault-accent/10 text-vault-accent border border-vault-accent/20">
           <Bell size={20} />
@@ -215,9 +250,9 @@ export default function VaultNotificationSettings({
             </div>
             <input
               type="checkbox"
-              checked={Boolean(settings[row.key])}
+              checked={Boolean((isReady ? settings : DEFAULT_PREFS)[row.key])}
               onChange={() => toggleSetting(row.key)}
-              disabled={!wallet}
+              disabled={!isReady || isSaving}
               className="h-5 w-5 rounded border-vault-border text-vault-accent focus:ring-2 focus:ring-vault-accent"
             />
           </label>
@@ -246,13 +281,15 @@ export default function VaultNotificationSettings({
 
       <button
         onClick={handleSave}
-        disabled={isSaving || !wallet}
+        disabled={isSaving || !isReady}
         className="vq-btn-primary w-full disabled:opacity-60"
       >
-        {isSaving ? "Saving…" : "Save Preferences"}
+        {wallet && !isReady
+          ? "Loading preferences…"
+          : isSaving ? "Saving…" : "Save Preferences"}
       </button>
 
-      {showSaved && (
+      {showSaved && isReady && (
         <div className="flex items-center gap-2 text-sm text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3">
           <CheckCircle2 size={16} />
           <span>
@@ -262,7 +299,7 @@ export default function VaultNotificationSettings({
         </div>
       )}
 
-      {error && (
+      {error && isReady && (
         <div className="flex items-start gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg p-3">
           <AlertCircle size={16} className="mt-0.5 shrink-0" />
           <span>{error}</span>
