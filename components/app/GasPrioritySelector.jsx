@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import {
   AVALANCHE_FEE_CONFIG,
+  FEE_STALE_AFTER_MS,
   STELLAR_FEE_CONFIG,
   buildAvalancheFeeEstimate,
   buildStellarFeeEstimate,
@@ -85,6 +86,7 @@ export default function GasPrioritySelector({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [feeNow, setFeeNow] = useState(() => Date.now());
 
   const isStellar = network === "stellar";
   const tier = PRIORITY_TIERS.find((item) => item.key === priorityKey) ?? PRIORITY_TIERS[1];
@@ -112,6 +114,7 @@ export default function GasPrioritySelector({
             customHorizonUrl,
           });
           if (cancelled) return;
+          setFeeNow(Date.now());
           setStellarFees({
             baseFeeStroops: result.baseFeeStroops,
             sourceLedger: result.sourceLedger,
@@ -153,6 +156,21 @@ export default function GasPrioritySelector({
     };
   }, [customHorizonUrl, isStellar, isUnsupported, networkType, refreshTick]);
 
+  useEffect(() => {
+    if (!isStellar || isUnsupported || !stellarFees.sourceLedger || !stellarFees.fetchedAt) {
+      return;
+    }
+    const expiresAt = new Date(stellarFees.fetchedAt).getTime() + FEE_STALE_AFTER_MS;
+    if (feeNow >= expiresAt) return;
+
+    // Expire an idle sample without polling or waiting for a user interaction.
+    const timeout = setTimeout(
+      () => setFeeNow(Date.now()),
+      Math.max(0, expiresAt - Date.now()),
+    );
+    return () => clearTimeout(timeout);
+  }, [feeNow, isStellar, isUnsupported, stellarFees.fetchedAt, stellarFees.sourceLedger]);
+
   const feeSummary = useMemo(() => {
     if (isStellar) {
       const estimate = buildStellarFeeEstimate({
@@ -165,6 +183,7 @@ export default function GasPrioritySelector({
         horizonUrl: stellarFees.horizonUrl,
         priorityKey: tier.key,
         isUnsupported,
+        now: feeNow,
       });
       return {
         estimatedNative: estimate.estimatedNative,
@@ -197,6 +216,7 @@ export default function GasPrioritySelector({
     avalancheFees.fetchedAt,
     avalancheFees.gasPriceWei,
     error,
+    feeNow,
     isStellar,
     isUnsupported,
     networkType,
@@ -213,6 +233,7 @@ export default function GasPrioritySelector({
         fetchedAt: stellarFees.fetchedAt,
         sourceLedger: stellarFees.sourceLedger,
         isUnsupported,
+        now: feeNow,
       })
     : isUnsupported
       ? "unsupported"

@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import GasPrioritySelector from "./GasPrioritySelector";
 
@@ -11,6 +11,8 @@ describe("GasPrioritySelector — Stellar fee isolation (#123)", () => {
   });
 
   afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
     global.fetch = originalFetch;
   });
 
@@ -205,5 +207,124 @@ describe("GasPrioritySelector — Stellar fee isolation (#123)", () => {
     expect(lastCall.network).toBe("Avalanche");
     expect(lastCall.payload.type).toBe("evm");
     expect(lastCall.payload.chain).toBe("Avalanche C-Chain");
+  });
+
+  describe("Stellar fee expiry while mounted", () => {
+    async function renderTimedSelector(props = {}) {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-10-03T12:00:00.000Z"));
+      let ledger = 5432100;
+      global.fetch = vi.fn().mockImplementation(async (url) =>
+        new Response(
+          JSON.stringify(
+            String(url).includes("fee_stats")
+              ? { last_ledger: ledger++, last_ledger_base_fee: 120 }
+              : { result: "0x5d21dba00" },
+          ),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+      const onChange = vi.fn();
+      let view;
+      await act(async () => {
+        view = render(<GasPrioritySelector {...props} onChange={onChange} />);
+      });
+      return { ...view, onChange };
+    }
+
+    async function advanceTime(ms) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    }
+
+    function latest(onChange) {
+      return onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    }
+
+    it.each(["testnet", "mainnet"])(
+      "expires the idle %s sample at 60 seconds in both the UI and parent payload",
+      async (networkType) => {
+        const { onChange } = await renderTimedSelector({ networkType });
+        await advanceTime(59_999);
+        expect(screen.getByTestId("metric-freshness")).toHaveTextContent("Live rate");
+        expect(latest(onChange)).toMatchObject({ isStale: false, payload: { isStale: false } });
+
+        await advanceTime(1);
+        expect(screen.getByTestId("metric-freshness")).toHaveTextContent("Stale data");
+        expect(screen.getByTestId("fee-warning-alert")).toBeInTheDocument();
+        expect(latest(onChange)).toMatchObject({
+          isStale: true,
+          payload: { isStale: true, ageMs: 60_000, sourceLedger: "5432100" },
+        });
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("keeps a refreshed sample fresh through the old deadline and expires at its own deadline", async () => {
+      const { onChange } = await renderTimedSelector();
+      await advanceTime(30_000);
+      await act(async () => { fireEvent.click(screen.getByTestId("refresh-fees-btn")); });
+      const refreshedAt = latest(onChange).freshness;
+      expect(latest(onChange).sourceLedger).toBe("5432101");
+
+      await advanceTime(30_000);
+      expect(screen.getByTestId("metric-freshness")).toHaveTextContent("Live rate");
+      expect(latest(onChange).isStale).toBe(false);
+      await advanceTime(29_999);
+      expect(latest(onChange).payload.isStale).toBe(false);
+      await advanceTime(1);
+      expect(screen.getByTestId("metric-freshness")).toHaveTextContent("Stale data");
+      expect(latest(onChange)).toMatchObject({
+        freshness: refreshedAt,
+        isStale: true,
+        payload: { isStale: true, ageMs: 60_000, sourceLedger: "5432101" },
+      });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("restores freshness after an expired sample is refreshed", async () => {
+      const { onChange } = await renderTimedSelector();
+      await advanceTime(60_000);
+      expect(latest(onChange).payload.isStale).toBe(true);
+      await act(async () => { fireEvent.click(screen.getByTestId("refresh-fees-btn")); });
+      expect(screen.getByTestId("metric-freshness")).toHaveTextContent("Live rate");
+      expect(latest(onChange)).toMatchObject({
+        isStale: false,
+        payload: { isStale: false, ageMs: 0, sourceLedger: "5432101" },
+      });
+      await advanceTime(59_999);
+      expect(latest(onChange).payload.isStale).toBe(false);
+      await advanceTime(1);
+      expect(latest(onChange).payload.isStale).toBe(true);
+    });
+
+    it.each(["unsupported", "avalanche"])(
+      "stops the Stellar deadline when the selector becomes %s",
+      async (state) => {
+        const { onChange, rerender } = await renderTimedSelector();
+        await advanceTime(30_000);
+        await act(async () => {
+          rerender(
+            <GasPrioritySelector
+              network={state === "avalanche" ? "avalanche" : "stellar"}
+              isUnsupported={state === "unsupported"}
+              onChange={onChange}
+            />,
+          );
+        });
+        const calls = onChange.mock.calls.length;
+        expect(screen.getByTestId("metric-freshness")).toHaveTextContent(
+          state === "unsupported" ? "Unsupported" : "Live rate",
+        );
+        await advanceTime(60_000);
+        expect(onChange).toHaveBeenCalledTimes(calls);
+        expect(latest(onChange).network).toBe(state === "avalanche" ? "Avalanche" : "Stellar");
+      },
+    );
+
+    it("clears a pending deadline when the selector is unmounted", async () => {
+      const { unmount } = await renderTimedSelector();
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 });
