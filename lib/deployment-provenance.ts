@@ -166,6 +166,9 @@ export const CANONICAL_PROVENANCE: CanonicalProvenance = {
 /** High latency soft threshold for Horizon/Soroban probes (ms). */
 export const RPC_STALE_LATENCY_MS = 1500;
 
+/** Allow bounded clock skew between the indexer and the health endpoint. */
+const INDEXER_MAX_CLOCK_SKEW_MS = 60_000;
+
 export function worstHealth(...states: HealthState[]): HealthState {
   if (states.includes("degraded")) return "degraded";
   if (states.includes("stale")) return "stale";
@@ -236,10 +239,15 @@ export function evaluateIndexerHealth(
 ): DependencyCheck {
   const checkedAt = now.toISOString();
   const remediationUrl = provenance.remediation.indexer;
-  const syncLag = Math.max(0, Number(probe.syncLag) || 0);
-  const latestLedger = Math.max(0, Number(probe.latestLedger) || 0);
-  const lastError = probe.lastError || null;
-  const backendStatus = (probe.status || "").toLowerCase();
+  const syncLag = probe.syncLag ?? null;
+  const latestLedger = probe.latestLedger ?? null;
+  const lastError = typeof probe.lastError === "string" ? probe.lastError : null;
+  const backendStatus =
+    typeof probe.status === "string" ? probe.status.toLowerCase() : "";
+  const successAt =
+    typeof probe.lastSuccessSyncTime === "string"
+      ? Date.parse(probe.lastSuccessSyncTime)
+      : NaN;
 
   const base = {
     id: "indexer",
@@ -259,10 +267,17 @@ export function evaluateIndexerHealth(
 
   if (
     !["healthy", "lagging", "stale", "degraded"].includes(backendStatus) ||
-    probe.syncLag == null ||
-    !Number.isFinite(Number(probe.syncLag)) ||
-    !probe.lastSuccessSyncTime ||
-    !Number.isFinite(Date.parse(probe.lastSuccessSyncTime))
+    typeof syncLag !== "number" ||
+    !Number.isSafeInteger(syncLag) ||
+    syncLag < 0 ||
+    (latestLedger !== null &&
+      (typeof latestLedger !== "number" ||
+        !Number.isSafeInteger(latestLedger) ||
+        latestLedger < 0)) ||
+    !Number.isFinite(successAt) ||
+    successAt > now.getTime() + INDEXER_MAX_CLOCK_SKEW_MS ||
+    (probe.lastError != null && typeof probe.lastError !== "string") ||
+    (probe.message != null && typeof probe.message !== "string")
   ) {
     return {
       ...base,
@@ -290,18 +305,13 @@ export function evaluateIndexerHealth(
     };
   }
 
-  const successAt = probe.lastSuccessSyncTime
-    ? Date.parse(probe.lastSuccessSyncTime)
-    : NaN;
-  if (Number.isFinite(successAt)) {
-    const ageMs = Math.max(0, now.getTime() - successAt);
-    if (ageMs >= provenance.indexer.staleAfterMs) {
-      return {
-        ...base,
-        status: "stale",
-        detail: `Last successful sync ${Math.round(ageMs / 1000)}s ago (stale after ${provenance.indexer.staleAfterMs / 1000}s).`,
-      };
-    }
+  const ageMs = Math.max(0, now.getTime() - successAt);
+  if (ageMs >= provenance.indexer.staleAfterMs) {
+    return {
+      ...base,
+      status: "stale",
+      detail: `Last successful sync ${Math.round(ageMs / 1000)}s ago (stale after ${provenance.indexer.staleAfterMs / 1000}s).`,
+    };
   }
 
   if (
@@ -413,27 +423,22 @@ export function detectConfigDrift(
     },
   );
 
-  if (
-    typeof runtime?.contractId === "string" &&
-    runtime.contractId &&
-    runtime.contractId !== provenance.contract.contractId
-  ) {
-    drifts.push({
-      parameter: "contractId",
-      expected: provenance.contract.contractId,
-      actual: runtime.contractId,
-      severity: "critical",
-      impact: "UI / indexer may be talking to a different on-chain deployment.",
-    });
-  }
-
-  if (!runtime?.contractId) {
+  const actualContractId = runtime?.contractId;
+  if (typeof actualContractId !== "string" || !actualContractId.trim()) {
     drifts.push({
       parameter: "contractId",
       expected: provenance.contract.contractId,
       actual: "unavailable",
       severity: "critical",
       impact: "The active contract ID could not be observed.",
+    });
+  } else if (actualContractId !== provenance.contract.contractId) {
+    drifts.push({
+      parameter: "contractId",
+      expected: provenance.contract.contractId,
+      actual: actualContractId,
+      severity: "critical",
+      impact: "UI / indexer may be talking to a different on-chain deployment.",
     });
   }
 

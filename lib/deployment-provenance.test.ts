@@ -9,6 +9,7 @@ import {
   verifyContractProvenance,
   worstHealth,
 } from "./deployment-provenance";
+import type { IndexerProbeInput } from "./deployment-provenance";
 
 const NOW = new Date("2026-09-25T18:00:00.000Z");
 
@@ -80,6 +81,75 @@ describe("evaluateRpcHealth", () => {
 });
 
 describe("evaluateIndexerHealth", () => {
+  const freshProbe = {
+    status: "healthy",
+    latestLedger: 1_500_000,
+    syncLag: 0,
+    lastSuccessSyncTime: "2026-09-25T17:59:00.000Z",
+  };
+
+  it.each([
+    ["negative", -1],
+    ["fractional", 0.5],
+    ["numeric string", "0"],
+    ["empty string", ""],
+    ["boolean", false],
+    ["array", []],
+    ["non-finite", Infinity],
+    ["unsafe integer", Number.MAX_SAFE_INTEGER + 1],
+  ])("degrades %s indexer lag instead of coercing it to healthy", (_label, syncLag) => {
+    const report = evaluateIndexerHealth(
+      { ...freshProbe, syncLag } as unknown as IndexerProbeInput,
+      baseProvenance,
+      NOW,
+    );
+    expect(report.status).toBe("degraded");
+    expect(report.detail).toMatch(/invalid/i);
+  });
+
+  it.each([
+    ["status", { state: "healthy" }],
+    ["latestLedger", "1500000"],
+    ["latestLedger", -1],
+    ["lastError", { message: "unavailable" }],
+    ["message", { text: "in sync" }],
+    ["lastSuccessSyncTime", true],
+  ])("degrades malformed %s without throwing or returning object details", (field, value) => {
+    const report = evaluateIndexerHealth(
+      { ...freshProbe, [field as string]: value } as unknown as IndexerProbeInput,
+      baseProvenance,
+      NOW,
+    );
+    expect(report.status).toBe("degraded");
+    expect(typeof report.detail).toBe("string");
+  });
+
+  it("degrades a last-success timestamp beyond the allowed clock skew", () => {
+    const report = evaluateIndexerHealth(
+      {
+        ...freshProbe,
+        lastSuccessSyncTime: new Date(NOW.getTime() + 60_001).toISOString(),
+      },
+      baseProvenance,
+      NOW,
+    );
+    expect(report.status).toBe("degraded");
+    expect(report.detail).toMatch(/invalid/i);
+  });
+
+  it("allows a last-success timestamp within the one-minute clock skew", () => {
+    expect(
+      evaluateIndexerHealth(
+        {
+          ...freshProbe,
+          lastSuccessSyncTime: new Date(NOW.getTime() + 60_000).toISOString(),
+        },
+        baseProvenance,
+        NOW,
+      ).status,
+    ).toBe("healthy");
+  });
+
   it("marks a fresh low-lag indexer as healthy", () => {
     const report = evaluateIndexerHealth(
       {
@@ -187,6 +257,30 @@ describe("verifyContractProvenance", () => {
 });
 
 describe("detectConfigDrift", () => {
+  it.each([
+    ["number", 123],
+    ["boolean", true],
+    ["object", {}],
+    ["array", []],
+  ])("degrades an observed contract ID with %s type", (_label, contractId) => {
+    const report = detectConfigDrift(
+      {
+        ...baseProvenance.protocolParameters,
+        contractId: contractId as unknown as string,
+      },
+      baseProvenance,
+      NOW,
+    );
+    expect(report.status).toBe("degraded");
+    expect(report.drifts).toContainEqual(
+      expect.objectContaining({
+        parameter: "contractId",
+        actual: "unavailable",
+        severity: "critical",
+      }),
+    );
+  });
+
   it("reports healthy when runtime matches canonical provenance", () => {
     const report = detectConfigDrift(
       {
