@@ -154,6 +154,10 @@ export default function SupportWidget() {
 
       if (!res.ok) {
         if (!ownsDraft()) return;
+        if (res.status === 409 && payload?.error?.code === "IDEMPOTENCY_CONFLICT") {
+          // A confirmed rejection can use a new key on the next explicit submit.
+          retryRef.current = null;
+        }
         const message =
           payload?.error?.message ||
           (res.status === 429

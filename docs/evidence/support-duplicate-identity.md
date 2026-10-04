@@ -160,3 +160,27 @@ After that process exited, a GET for `?id=VQ-20261003-777777` returned HTTP 404 
 This is real filesystem and process-restart evidence for the existing single-host store. It does not establish coordination between independent writers, recovery of the malformed fragment itself, or power-loss durability. The partial-append regression injects an I/O rejection after writing actual bytes; it does not simulate a physical storage failure.
 
 The unchanged widget, full workspace suite, full Next application/build, route smoke/Playwright E2E, deployed intake and sponsor Node 20 matrix were not rerun for this store-only continuation. Earlier UI and API evidence remains above and in `docs/TESTING.md`. The previously documented workspace installation mismatch was not retried. Hosted CI and maintainer acceptance remain separate from these local results.
+
+## Conflicting reuse of a recorded idempotency key
+
+This continuation starts from `3d78bfda2ad72ee607528bc9286bdf69d7cb26af` on the same PR #218 branch. It deliberately tightens the previously tested first-wins contract: a key already recorded for a persisted ticket may replay its receipt only when the normalized submitted content matches. Previously, changing the description while reusing that key returned the first receipt with HTTP 200 although the different description was not stored.
+
+The comparison uses normalized name, email, category, description, wallet hint, and schema version. Receipt metadata is excluded. A mismatch raises `IDEMPOTENCY_CONFLICT` before rate accounting, duplicate handling, or persistence. The API returns HTTP 409 with a fixed error message and no earlier receipt or ticket fields. The widget keeps the draft and, only for this known conflict on its current draft, discards the retry key. Its next explicit submission creates a fresh key; no automatic request is added.
+
+This is an endpoint contract correction, not a demonstrated ordinary widget edit-loss failure. The existing widget already assigns new keys to changed payloads and ignores stale responses. The separate similarity-based duplicate path for new or absent keys remains broader than exact content matching, so its draft-preserving warning remains in place.
+
+### Focused evidence
+
+The two cases in `lib/support-idempotency-conflict.test.js` use the actual store modules and real temporary JSONL files. The preceding source fails both; the corrected source passes both. They cover normalized equivalent retries; changes to all five user-editable accepted fields; unchanged quota and prior ticket; two queued submissions; rejection after reopening storage; byte-preserving rejection; original receipt recovery; and a fresh-key submission of different content.
+
+The existing idempotency case in `lib/support-tickets.test.js` now demonstrates a normalized equivalent retry. Its old changed-description expectation is intentionally superseded.
+
+Maintained command, in the normal repository environment:
+
+```sh
+pnpm exec vitest run lib/support-idempotency-conflict.test.js lib/support-tickets.test.js
+```
+
+Observed here: Node 24.19.0 executed the two new cases with only their `describe`/`it` registration import changed from Vitest to `node:test`; all assertions and production modules were retained. The normal Vitest command and the earlier suite were not rerun. No package or dependency was installed.
+
+An additional execution of the actual POST handler and file store used native `Response.json` at the `NextResponse.json` dependency boundary. Initial submission, conflicting reuse, original retry, and fresh-key recovery returned **201 / 200 / 200 / 201** before and **201 / 409 / 200 / 201** after. Only the conflict response lacked a receipt. This verifies handler branching with that adapter; it is not a native Next server, browser, deployed intake, or full application test. The four-line widget change was reviewed against its existing draft-ownership guard and uncertain-retry behavior; no React runtime execution is claimed.

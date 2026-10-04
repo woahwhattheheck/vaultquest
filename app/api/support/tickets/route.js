@@ -63,6 +63,17 @@ export async function POST(req) {
         { status: 400 },
       );
     }
+    if (code === "IDEMPOTENCY_CONFLICT") {
+      return NextResponse.json(
+        {
+          error: {
+            code,
+            message: "Your ticket details could not be accepted. Your draft was kept. Please submit again.",
+          },
+        },
+        { status: 409 },
+      );
+    }
     if (code === "RATE_LIMITED") {
       const retryAfterSec = Math.ceil((err.retryAfterMs || 60_000) / 1000);
       return NextResponse.json(
