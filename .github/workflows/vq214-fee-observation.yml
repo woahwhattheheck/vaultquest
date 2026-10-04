@@ -45,6 +45,8 @@ jobs:
               workspace.write_bytes(original)
           if subprocess.check_output(['git','status','--porcelain'],cwd=root,text=True).strip():
               raise RuntimeError('install changed tracked source or dependency pins')
+      - name: Select isolated compatible runner without product manifest changes
+        run: python controller/runner_compat.py
       - name: Reproduce and repair the actual fee observation path
         run: python controller/repair.py subject evidence
       - name: Retain tested source on a new candidate ref only
@@ -61,5 +63,7 @@ jobs:
         if: always()
         with:
           name: vq214-fee-observation-evidence
-          path: evidence
+          path: |
+            evidence
+            runner-runtime/package-lock.json
           retention-days: 14
