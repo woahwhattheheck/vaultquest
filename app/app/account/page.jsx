@@ -202,9 +202,10 @@ export default function AccountPage() {
         />
       ) : (
         <>
-          {walletState.wasDisconnected && (
+          {(walletState.wasDisconnected || walletState.isNetworkMismatch) && (
             <WalletReconnectGuidance
-              isDisconnected
+              isDisconnected={walletState.wasDisconnected}
+              isNetworkMismatch={walletState.isNetworkMismatch}
               onRetry={handleRetry}
             />
           )}

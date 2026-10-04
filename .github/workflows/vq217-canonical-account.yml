@@ -15,38 +15,33 @@ jobs:
       run:
         shell: bash
     env:
-      SOURCE: cb01a810fbacba8333bcbf4af329c3b5555f9065
-      DONOR: 08915ce6cf89fcbc238319599d77ff41ff30bc7b
-      DONOR_BASE: 13992798d927883579f8c4c4505069b4f34b249b
+      SOURCE: fcd85bdefc1f6f20859187832b56dec586d04977
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
           persist-credentials: false
-      - name: Bind the unchanged feature and compatible dependency donor
+      - name: Bind the account source and the two changed files
         run: |
           mkdir -p evidence
-          git fetch --no-tags --depth=1 origin "$DONOR" "$DONOR_BASE"
           python3 - <<'PY' | tee evidence/source-binding.json
           import json, os, subprocess
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
-          source, donor, old = (os.environ[k] for k in ('SOURCE', 'DONOR', 'DONOR_BASE'))
-          manifests = ['package.json', 'backend/package.json', 'stellar-wallet-connect/package.json']
-          identity = {}
-          for path in manifests:
-              a, b = git('rev-parse', source + ':' + path), git('rev-parse', donor + ':' + path)
-              assert a == b, ('workspace manifest differs', path, a, b)
-              identity[path] = a
-          expected = {'pnpm-workspace.yaml': '24b0f88d509b3fb6d4b62ce0918366697aacaf7f', 'pnpm-lock.yaml': '8c60c191836213cf9024f4c65616fbf59537e756'}
-          for path, blob in expected.items():
-              assert git('rev-parse', 'HEAD:' + path) == git('rev-parse', donor + ':' + path) == blob
-              assert git('rev-parse', source + ':' + path) == git('rev-parse', old + ':' + path), ('different original dependency source', path)
+          source = os.environ['SOURCE']
+          expected = {
+              'app/app/account/page.jsx': '1d621c73df6a11fd04cf478db6e72595142bac35',
+              'app/app/account/page.test.jsx': '7ccfcd38f6f3c1527791b449f3a0f366fd61a503',
+          }
           changed = set(git('diff', '--name-only', source, 'HEAD').splitlines())
           assert changed == set(expected) | {'.github/workflows/vq217-canonical-account.yml'}, changed
-          print(json.dumps({'source': source, 'donor': donor, 'donorBase': old, 'controller': git('rev-parse', 'HEAD'), 'manifestBlobs': identity, 'dependencyBlobs': expected, 'changedPaths': sorted(changed)}, indent=2))
+          identities = {}
+          for path, before in expected.items():
+              assert git('rev-parse', source + ':' + path) == before
+              identities[path] = {'before': before, 'checked': git('rev-parse', 'HEAD:' + path)}
+          print(json.dumps({'source': source, 'controller': git('rev-parse', 'HEAD'),
+              'files': identities, 'changedPaths': sorted(changed)}, indent=2))
           PY
-          git diff "$SOURCE" HEAD -- pnpm-workspace.yaml pnpm-lock.yaml > evidence/dependency-composition.patch
           git ls-files -s > evidence/source-manifest.txt
           sha256sum pnpm-workspace.yaml pnpm-lock.yaml > evidence/dependencies-before.sha256
       - uses: actions/setup-node@v4
@@ -69,10 +64,42 @@ jobs:
           const local = createRequire(vitest);
           console.log(JSON.stringify({ node: process.version, vitest: require(vitest).version, vite: local('vite/package.json').version, jsdom: require('jsdom/package.json').version }, null, 2));
           JS
+      - name: Reproduce only the two new fixture cases on the previous page
+        timeout-minutes: 3
+        run: |
+          candidate_page="$RUNNER_TEMP/vq217-candidate-page.jsx"
+          cp app/app/account/page.jsx "$candidate_page"
+          trap 'cp "$candidate_page" app/app/account/page.jsx' EXIT
+          git show "$SOURCE:app/app/account/page.jsx" > app/app/account/page.jsx
+          set +e
+          pnpm exec vitest run app/app/account/page.test.jsx -t mismatch-only --reporter=default --reporter=json --outputFile.json=evidence/baseline-tests.json > evidence/baseline-tests.log 2>&1
+          baseline_status=$?
+          set -e
+          cat evidence/baseline-tests.log
+          test "$baseline_status" = 1
+          node - <<'JS'
+          const assert = require('node:assert/strict');
+          const result = require('./evidence/baseline-tests.json');
+          assert.equal(result.numFailedTests, 1);
+          assert.equal(result.numPassedTests, 1);
+          const cases = result.testResults.flatMap(test => test.assertionResults).filter(test => ['passed', 'failed'].includes(test.status));
+          assert.equal(cases.length, 2);
+          assert(cases.find(test => /authorization is true/.test(test.fullName))?.status === 'failed');
+          assert(cases.find(test => /authorization is false/.test(test.fullName))?.status === 'passed');
+          JS
+          cp "$candidate_page" app/app/account/page.jsx
+          trap - EXIT
       - name: Run the existing account acceptance selection
         timeout-minutes: 3
         run: |
           pnpm exec vitest run lib/account-wallet-state.test.js app/app/account/page.test.jsx --reporter=default --reporter=json --outputFile.json=evidence/account-tests.json 2>&1 | tee evidence/account-tests.log
+          node - <<'JS'
+          const assert = require('node:assert/strict');
+          const result = require('./evidence/account-tests.json');
+          assert.equal(result.numPassedTests, 23);
+          assert.equal(result.numFailedTests, 0);
+          assert.equal(result.numPendingTests, 0);
+          JS
           sha256sum -c evidence/dependencies-before.sha256
           git diff --exit-code
           git diff --cached --exit-code
