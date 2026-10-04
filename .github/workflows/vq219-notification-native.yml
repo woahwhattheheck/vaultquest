@@ -1,0 +1,112 @@
+name: VQ219 native notification preferences
+on:
+  push:
+    branches: [validation/vq219-notification-native-4d43-20261004]
+    paths: [.github/workflows/vq219-notification-native.yml]
+permissions:
+  contents: write
+concurrency:
+  group: vq219-notification-native-4d43
+  cancel-in-progress: false
+jobs:
+  notification-preferences:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: subject/backend
+    steps:
+      - name: Check out validation controller
+        uses: actions/checkout@v6
+        with:
+          path: controller
+      - name: Check out immutable product
+        uses: actions/checkout@v6
+        with:
+          ref: bd3fb8ffc552aa4da570931dcf806e9e0ba81c66
+          path: subject
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Record exact source and original lock
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = bd3fb8ffc552aa4da570931dcf806e9e0ba81c66
+          test "$(git hash-object src/services/notificationPreferences.ts)" = b786a0f01d594836ba968c3fb256d377f662a999
+          test "$(git hash-object tests/notification-preferences.spec.ts)" = 9c242636c79b631831f8321d7ecc86107c61d605
+          test "$(git hash-object package.json)" = 89c18f365b2200fb693134557b066810a89861a3
+          test "$(git hash-object package-lock.json)" = ab5a94d637034000d67536be5e26a5eb1d6095af
+          cp package-lock.json "$RUNNER_TEMP/vq219-original-package-lock.json"
+          node --version
+          npm --version
+          docker --version
+      - name: Synchronize only the existing manifest declarations
+        run: |
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          test "$(git hash-object package.json)" = 89c18f365b2200fb693134557b066810a89861a3
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const before = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/vq219-original-package-lock.json'));
+          const after = JSON.parse(fs.readFileSync('package-lock.json'));
+          const changed = Object.entries(before.packages).filter(([name, old]) => {
+            if (!name) return false;
+            const next = after.packages[name];
+            return !next || next.version !== old.version || next.integrity !== old.integrity;
+          }).map(([name]) => name);
+          console.log('Existing version/integrity changes:', JSON.stringify(changed));
+          assert.deepEqual(changed, [], 'Do not upgrade or remove existing dependency pins');
+          const manifest = JSON.parse(fs.readFileSync('package.json'));
+          assert.deepEqual(after.packages[''].dependencies, manifest.dependencies);
+          assert.deepEqual(after.packages[''].devDependencies, manifest.devDependencies);
+          console.log('New locked dependencies:', JSON.stringify(Object.entries(after.packages).filter(([name]) => !(name in before.packages)).map(([name, entry]) => ({ name, version: entry.version }))));
+          JS
+          test "$(git diff --name-only)" = backend/package-lock.json
+          git hash-object package-lock.json
+          sha256sum package-lock.json
+      - name: Preserve generated lock on this validation branch
+        working-directory: controller
+        run: |
+          set -euo pipefail
+          mkdir -p backend
+          cp ../subject/backend/package-lock.json backend/package-lock.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend/package-lock.json
+          test "$(git diff --cached --name-only)" = backend/package-lock.json
+          git commit -m 'chore(validation): retain VQ219 synchronized backend lock [skip ci]'
+          git push origin HEAD:refs/heads/validation/vq219-notification-native-4d43-20261004
+          git rev-parse HEAD
+      - name: Install synchronized locked backend dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Generate the existing Prisma client
+        run: ./node_modules/.bin/prisma generate
+      - name: Run only the maintained notification preferences spec
+        run: |
+          set -euo pipefail
+          node node_modules/vitest/vitest.mjs run tests/notification-preferences.spec.ts --maxWorkers=1 --minWorkers=1 --reporter=json --outputFile=notification-native-results.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const result = JSON.parse(fs.readFileSync('notification-native-results.json'));
+          console.log(JSON.stringify(result, null, 2));
+          assert.equal(result.numTotalTests, 16);
+          assert.equal(result.numPassedTests, 16);
+          assert.equal(result.numFailedTests, 0);
+          assert.equal(result.numPendingTests, 0);
+          assert.equal(result.numTodoTests, 0);
+          console.log('VQ219_NATIVE_RESULT: 16 passed, zero failed/skipped/todo; actual Fastify + Prisma + postgres:16-alpine Testcontainers');
+          JS
+      - name: Report exact native tool versions and unchanged subject inputs
+        if: always()
+        run: |
+          node --version
+          npm --version
+          git diff --stat
+          git hash-object package-lock.json src/services/notificationPreferences.ts tests/notification-preferences.spec.ts
+          if [ -d node_modules ]; then
+            npm ls @prisma/client prisma fastify vitest @testcontainers/postgresql --depth=0
+          fi
