@@ -168,8 +168,15 @@ export class JobLeaseService {
         return fn(tx);
       })
     };
+    // A fenced transaction may hold the lease row while renewal waits. Keep
+    // the existing cadence, but never queue another renewal for this run.
+    let renewalInFlight = false;
     const heartbeat = setInterval(() => {
-      void this.heartbeat(jobName, acquisition.fenceToken, abort);
+      if (renewalInFlight || abort.signal.aborted) return;
+      renewalInFlight = true;
+      void this.heartbeat(jobName, acquisition.fenceToken, abort).finally(() => {
+        renewalInFlight = false;
+      });
     }, this.heartbeatMs);
     // Allow process to exit even if a heartbeat timer is pending.
     heartbeat.unref?.();
