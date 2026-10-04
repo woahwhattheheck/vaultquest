@@ -1,0 +1,92 @@
+name: VQ216 canonical retry acceptance
+on:
+  push:
+    branches: [validation/vq216-canonical-pnpm-ledger0938]
+permissions:
+  contents: read
+jobs:
+  canonical:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 15fde845ffc9812f5e7fe6d1291c2e8cdc2f4041
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - name: Record immutable source and reused dependency blobs
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/product-source.txt
+          pnpm --version | tee evidence/pnpm-version.txt
+          node --version | tee evidence/node-version.txt
+          test "$(pnpm --version)" = 10.28.2
+          python3 - <<'PY'
+          import subprocess, json
+          from pathlib import Path
+          expected = {
+            'package.json': '72f6c4c7ca14263cb9e5836368bb399798838d0d',
+            'backend/package.json': '89c18f365b2200fb693134557b066810a89861a3',
+            'stellar-wallet-connect/package.json': '453b5d24dc77ae19ee91b9baddb0c82cbe582c40',
+            'pnpm-workspace.yaml': '24b0f88d509b3fb6d4b62ce0918366697aacaf7f',
+            'pnpm-lock.yaml': '8c60c191836213cf9024f4c65616fbf59537e756',
+            'lib/retry-queue-policy.test.js': '8951a99344ae8b768b062d06075113659b1c669f',
+            'lib/retry-queue-client.test.js': '8c2aea061be4d9cb1b2e9bf5370dfd3b756008a2',
+            'components/app/VaultRetryQueue.test.jsx': '943e2b3a6079b1d4c928dd0318fa8b77d6c2f94f',
+          }
+          actual = {p: subprocess.check_output(['git', 'hash-object', p], text=True).strip() for p in expected}
+          assert actual == expected, actual
+          Path('evidence/source-blobs.json').write_text(json.dumps(actual, indent=2) + '\n')
+          PY
+          sha256sum pnpm-workspace.yaml pnpm-lock.yaml > evidence/dependencies-before.sha256
+      - name: Install normal complete workspace from the reused frozen lock
+        timeout-minutes: 5
+        run: |
+          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | tee evidence/frozen-install.log
+          sha256sum -c evidence/dependencies-before.sha256
+          node - <<'JS' | tee evidence/runner-versions.json
+          const { createRequire } = require('node:module');
+          const vitestPath = require.resolve('vitest/package.json');
+          const local = createRequire(vitestPath);
+          console.log(JSON.stringify({
+            node: process.version,
+            vitest: require(vitestPath).version,
+            vite: local('vite/package.json').version,
+            jsdom: require('jsdom/package.json').version,
+            react: require('react/package.json').version,
+            nanostores: require('node:fs').existsSync('node_modules/nanostores')
+          }, null, 2));
+          JS
+      - name: Run the original retry acceptance selection
+        timeout-minutes: 3
+        run: |
+          pnpm exec vitest run lib/retry-queue-policy.test.js lib/retry-queue-client.test.js components/app/VaultRetryQueue.test.jsx --reporter=default --reporter=json --outputFile=evidence/retry-tests.json 2>&1 | tee evidence/retry-tests.log
+          node - <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const result = JSON.parse(fs.readFileSync('evidence/retry-tests.json', 'utf8'));
+          assert.equal(result.success, true);
+          assert.equal(result.numFailedTests, 0);
+          assert.equal(result.numPendingTests, 0);
+          assert.equal(result.testResults.length, 3);
+          assert.equal(result.numPassedTests, result.numTotalTests);
+          assert(result.numPassedTests >= 43, result.numPassedTests);
+          console.log(JSON.stringify({passed:result.numPassedTests,failed:result.numFailedTests,pending:result.numPendingTests,files:result.testResults.length}));
+          JS
+          sha256sum -c evidence/dependencies-before.sha256
+          git diff --exit-code
+      - name: Retain actual installation and acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vq216-canonical-retry
+          path: evidence/
+          retention-days: 7
