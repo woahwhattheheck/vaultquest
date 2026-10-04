@@ -1,0 +1,52 @@
+name: Rivet pinned source transfer
+on:
+  push:
+    branches: [source-transfer/rivet76f4-20261004]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Collect the two interrupted source scopes
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, urllib.request
+          root = pathlib.Path('source-transfer')
+          root.mkdir()
+          manifest = []
+          def read(url):
+              request = urllib.request.Request(url, headers={'User-Agent': 'pinned-source-transfer', 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return response.read()
+          def save(repo, ref, name, prefix):
+              data = read(f'https://raw.githubusercontent.com/{repo}/{ref}/{name}')
+              if len(data) > 8 * 1024 * 1024:
+                  raise RuntimeError('source file exceeds transfer bound')
+              target = root / prefix / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              manifest.append({'repository': repo, 'commit': ref, 'path': name, 'local_path': str(target.relative_to(root)), 'bytes': len(data), 'git_blob': blob, 'sha256': hashlib.sha256(data).hexdigest()})
+          for name in ['backend/src/services/jobLeaseService.ts', 'backend/tests/jobLease.spec.ts', 'backend/package.json']:
+              save('woahwhattheheck/vaultquest', '63afa4418edd7edeb19ca7564dc12940a00e2a45', name, 'vaultquest')
+          repo = 'woahwhattheheck/mova-store'
+          ref = 'aaf9925a9dcea11d902a2f3936282b3ed7cdbff9'
+          tree = json.loads(read(f'https://api.github.com/repos/{repo}/git/trees/8027339df3461fb01028b6dd1762a676c121b52f?recursive=1'))
+          if tree.get('truncated'):
+              raise RuntimeError('incomplete source tree')
+          names = [entry['path'] for entry in tree['tree'] if entry['type'] == 'blob' and ('scval' in entry['path'].lower() or entry['path'] in ['package.json', 'package-lock.json', 'vitest.config.ts', 'vitest.config.mts', 'tsconfig.json'])]
+          if not names or len(names) > 20:
+              raise RuntimeError('unexpected source selection')
+          for name in names:
+              save(repo, ref, name, 'mova-store')
+          (root / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rivet76f4-pinned-source
+          path: source-transfer/
+          retention-days: 7
+          if-no-files-found: error
