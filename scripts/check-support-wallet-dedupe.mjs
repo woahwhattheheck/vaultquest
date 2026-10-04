@@ -31,7 +31,14 @@ test('distinct wallet contexts persist separately and remain separately deduplic
       assert.equal(retry.duplicate, true);
       assert.equal(retry.ticket.id, results[i].ticket.id);
     }
-    assert.equal(await fs.readFile(file, 'utf8'), bytes);
+    const replayBytes = await fs.readFile(file, 'utf8');
+    assert.equal(replayBytes.startsWith(bytes), true);
+    const rows = replayBytes.trim().split('\n').map(JSON.parse);
+    assert.deepEqual(rows.filter((row) => row.id), results.map(({ ticket }) => ticket));
+    assert.equal(rows.length, 6);
+    assert.deepEqual(rows.filter((row) => row.record_type === 'idempotency_alias')
+      .map(({ idempotency_key, ticket_id }) => ({ idempotency_key, ticket_id })),
+    [2, 0, 1].map((i) => ({ idempotency_key: `retry-${i}`, ticket_id: results[i].ticket.id })));
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

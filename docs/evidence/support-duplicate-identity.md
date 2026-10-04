@@ -184,3 +184,29 @@ pnpm exec vitest run lib/support-idempotency-conflict.test.js lib/support-ticket
 Observed here: Node 24.19.0 executed the two new cases with only their `describe`/`it` registration import changed from Vitest to `node:test`; all assertions and production modules were retained. The normal Vitest command and the earlier suite were not rerun. No package or dependency was installed.
 
 An additional execution of the actual POST handler and file store used native `Response.json` at the `NextResponse.json` dependency boundary. Initial submission, conflicting reuse, original retry, and fresh-key recovery returned **201 / 200 / 200 / 201** before and **201 / 409 / 200 / 201** after. Only the conflict response lacked a receipt. This verifies handler branching with that adapter; it is not a native Next server, browser, deployed intake, or full application test. The four-line widget change was reviewed against its existing draft-ownership guard and uncertain-retry behavior; no React runtime execution is claimed.
+
+## Durable keys for acknowledged content duplicates
+
+Source base: `cd714bdb086e4ebf753f15cccd07b2795240c5c5`.
+
+A content duplicate submitted with a new form key previously returned the original receipt without binding that new key. Reopening the JSONL after the ten-minute content window could therefore accept the acknowledged retry as a second ticket. The real-file reproduction returned one receipt for the first two submissions and a different receipt after restart and expiry.
+
+The store now appends a typed `idempotency_alias` journal row before acknowledging a new key for duplicate content. That row binds the key and original receipt to a SHA-256 digest of the actual validated alias submission. This matters when the similarity rule considers differently cased or spaced descriptions equivalent: the alias must accept its own exact validated payload and reject changed details, even when those details match the canonical ticket.
+
+Recovery rebuilds alias bindings without replacing the canonical ticket, changing its creation time, or renewing the content window. Ordinary primary keys keep the existing strict field comparisons. A later recovered primary row clears any earlier alias digest for its key, retaining the loader's existing later-primary-wins behavior. Rejected alias persistence does not acknowledge or reserve the key. The existing file writer queue, rate policy, line-boundary recovery and single-writer limitations remain in effect.
+
+### Focused evidence and execution boundary
+
+Before the executor disconnected, Node 24.19.0 with retained Vitest 4.1.10 dependencies ran the actual store modules and real temporary JSONL files: **8 selected cases passed, 0 failed; 28 cases were unselected**. Selection covered the two existing primary-key conflict cases, three new alias cases, and three existing keyed/unkeyed content-duplicate cases. The new cases checked restart plus original-window expiry, conflicts against the actual alias payload with receipt/byte/quota preservation, and rejected alias writes followed by recovery. Running the three new cases against the original source through the recorded Node test-registration adapter failed all three; its two original controls passed.
+
+The production patch was recovered mechanically from the retained source preimage and the six reviewed edit blocks after the executor became unavailable. Maintained regression fixtures and this evidence text were reconstructed from the recorded assertions; byte identity with the executed fixture was not established, and the published tree was not rerun. The older wallet-context helper's unchanged-file assertion was also adjusted afterward to require three unchanged canonical tickets plus their three durable alias bindings; that assertion adjustment has only static review.
+
+Commands for the maintained focused regressions in the normal repository environment:
+
+```sh
+pnpm exec vitest run lib/support-idempotency-conflict.test.js lib/support-tickets.test.js \
+  -t 'support idempotency content|durable duplicate idempotency keys|reloads duplicate content without the original form key|keeps case and whitespace equivalent submissions as duplicates'
+node --test scripts/check-support-wallet-dedupe.mjs
+```
+
+The observed Vitest run used an isolated Node environment and already-retained dependencies. No new install, full-suite result, sponsor-runtime result, Next server, UI, deployment, multi-writer coordination or power-loss durability is claimed.
