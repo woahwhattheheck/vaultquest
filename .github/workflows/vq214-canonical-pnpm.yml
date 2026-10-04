@@ -44,6 +44,8 @@ jobs:
           for before, after in changes.items():
               assert s.count(before) == 1, before
               s = s.replace(before, after)
+          assert 'packageExtensions:' not in s
+          s += "\n# Supply the existing compatible WebSocket peer only to this subscription subtree.\npackageExtensions:\n  '@solana/rpc-subscriptions@2.3.0':\n    dependencies:\n      ws: '8.21.0'\n"
           p.write_text(s)
           PY
           pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts --reporter=append-only 2>&1 | tee evidence/lock-generation.log
@@ -72,6 +74,37 @@ jobs:
             vite: local('vite/package.json').version,
             jsdom: require('jsdom/package.json').version
           }, null, 2));
+          JS
+      - name: Verify installed peer bindings and generated lock edges
+        run: |
+          node - <<'JS' | tee evidence/peer-bindings.json
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { createRequire } = require('node:module');
+          const store = path.resolve('node_modules/.pnpm');
+          const entries = fs.readdirSync(store);
+          function inspect(prefix, packagePath, expected) {
+            const dirs = entries.filter(name => name === prefix || name.startsWith(prefix + '_'));
+            assert(dirs.length > 0, prefix);
+            return dirs.map(dir => {
+              const requireFrom = createRequire(path.join(store, dir, 'node_modules', packagePath, 'package.json'));
+              const resolved = requireFrom.resolve('ws/package.json');
+              const version = requireFrom(resolved).version;
+              assert.equal(version, expected, dir);
+              return { consumer: packagePath, ws: version };
+            });
+          }
+          const solana = inspect('@solana+rpc-subscriptions-channel-websocket@2.3.0',
+            '@solana/rpc-subscriptions-channel-websocket', '8.21.0');
+          const retained = inspect('@walletconnect+jsonrpc-ws-connection@1.0.16',
+            '@walletconnect/jsonrpc-ws-connection', '7.5.13');
+          const lock = fs.readFileSync('pnpm-lock.yaml', 'utf8').split('\nsnapshots:\n')[1];
+          const blocks = lock.split(/\n(?= {2}\S)/);
+          const targets = blocks.filter(block => /^  '?@solana\/rpc-subscriptions-channel-websocket@2\.3\.0[(:]/m.test(block));
+          assert(targets.length > 0);
+          for (const block of targets) assert(/\n      ws: 8\.21\.0(?:\(|\n|$)/.test(block), block);
+          console.log(JSON.stringify({ solana, retained, matchingLockEdges: targets.length }, null, 2));
           JS
       - name: Run the existing focused fee command
         timeout-minutes: 3
