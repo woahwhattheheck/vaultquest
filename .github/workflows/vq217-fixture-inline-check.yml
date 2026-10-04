@@ -1,0 +1,42 @@
+name: VQ217 fixture browser bundle
+on:
+  push:
+    branches: [verify/vq217-fixture-inline-rook-20261004]
+    paths: [.github/workflows/vq217-fixture-inline-check.yml]
+permissions:
+  contents: read
+concurrency:
+  group: vq217-fixture-inline-rook
+  cancel-in-progress: false
+jobs:
+  fixture-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 45fe7b1630350be8ce60863e4900949365ff29b8
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare isolated compiler without changing project dependencies
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/compiler" --ignore-scripts --omit=optional --no-package-lock --no-audit --no-fund next@14.2.33 react@18.3.1 react-dom@18.3.1
+      - name: Compile actual baseline and candidate browser modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/evidence/source-commit.txt"
+          git show a68ecb8f058ae3a807a2ac11383c1fad9a08e191:lib/account-wallet-state.js > "$RUNNER_TEMP/account-wallet-baseline.js"
+          NODE_PATH="$RUNNER_TEMP/compiler/node_modules" node scripts/check-account-fixture-bundle.cjs lib/account-wallet-state.js "$RUNNER_TEMP/account-wallet-baseline.js" 2>&1 | tee "$RUNNER_TEMP/evidence/fixture-bundle.log"
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vq217-fixture-bundle-45fe7b16
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7
