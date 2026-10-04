@@ -274,10 +274,9 @@ export default function VaultRetryQueue({
       try {
         let fresh = action;
         if (typeof client.getAction === "function") {
-          try {
-            fresh = (await client.getAction(action.id)) || action;
-          } catch {
-            fresh = action;
+          fresh = await client.getAction(action.id);
+          if (!fresh) {
+            throw new Error("Could not read the current action; retry was not sent.");
           }
         }
 
