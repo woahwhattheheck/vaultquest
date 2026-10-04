@@ -240,9 +240,17 @@ describe("VaultRetryQueue", () => {
       }
     },
   );
-  it.each(["preflight", "authentication", "creation"])(
-    "retires a retry paused at %s after switching away and back to the same wallet",
-    async (boundary) => {
+  it.each([
+    ["retry", "preflight", "wallet switch"],
+    ["retry", "authentication", "wallet switch"],
+    ["retry", "creation", "wallet switch"],
+    ["cancel", "preflight", "wallet switch"],
+    ["cancel", "authentication", "wallet switch"],
+    ["cancel", "preflight", "unmount"],
+    ["cancel", "authentication", "unmount"],
+  ])(
+    "retires a %s paused at %s after %s",
+    async (operation, boundary, transition) => {
       const original = {
         id: "act-001",
         wallet_address: WALLET,
@@ -253,8 +261,8 @@ describe("VaultRetryQueue", () => {
           amount: "500",
           token: "USDC",
         },
-        status: "failed",
-        error_code: "WALLET_REJECTED",
+        status: operation === "retry" ? "failed" : "pending",
+        error_code: operation === "retry" ? "WALLET_REJECTED" : null,
         retry_count: 0,
         created_at: "2026-09-24T12:00:00.000Z",
       };
@@ -271,13 +279,15 @@ describe("VaultRetryQueue", () => {
         let data;
         if (init.method === "POST") {
           if (boundary === "creation") await pause();
-          data = {
-            ...original,
-            id: "act-retry",
-            status: "pending",
-            error_code: null,
-            action_payload: JSON.parse(init.body).action_payload,
-          };
+          data = operation === "retry"
+            ? {
+                ...original,
+                id: "act-retry",
+                status: "pending",
+                error_code: null,
+                action_payload: JSON.parse(init.body).action_payload,
+              }
+            : { ...original, status: "failed", error_code: "USER_CANCELLED" };
         } else if (request.pathname === "/actions/act-001") {
           if (boundary === "preflight") await pause();
           data = original;
@@ -300,28 +310,34 @@ describe("VaultRetryQueue", () => {
         baseUrl: "http://ledger.test",
         fetchImpl,
         getAuthHeaders: async () => {
-          // The list and authoritative read authenticate before the retry POST.
+          // The list and authoritative read authenticate before the action POST.
           if (++authCalls === 3 && boundary === "authentication") await pause();
           return { "X-Wallet-Address": activeWallet };
         },
       });
       const requestSign = vi.fn().mockResolvedValue("explicit-user-signature");
-      const { rerender } = render(
+      const { rerender, unmount, container } = render(
         <VaultRetryQueue walletAddress={WALLET} client={client} requestSign={requestSign} />,
       );
-      fireEvent.click(await screen.findByRole("button", { name: "Retry deposit" }));
+      fireEvent.click(await screen.findByRole("button", {
+        name: operation === "retry" ? "Retry deposit" : "Cancel pending action",
+      }));
       try {
         await waitFor(() => expect(waiting).toBe(true));
-        activeWallet = WALLET_B;
-        rerender(
-          <VaultRetryQueue walletAddress={WALLET_B} client={client} requestSign={requestSign} />,
-        );
-        await screen.findByText(/Wallet B Pool/);
-        activeWallet = WALLET;
-        rerender(
-          <VaultRetryQueue walletAddress={WALLET} client={client} requestSign={requestSign} />,
-        );
-        await screen.findByText(/Wallet A Pool/);
+        if (transition === "unmount") {
+          unmount();
+        } else {
+          activeWallet = WALLET_B;
+          rerender(
+            <VaultRetryQueue walletAddress={WALLET_B} client={client} requestSign={requestSign} />,
+          );
+          await screen.findByText(/Wallet B Pool/);
+          activeWallet = WALLET;
+          rerender(
+            <VaultRetryQueue walletAddress={WALLET} client={client} requestSign={requestSign} />,
+          );
+          await screen.findByText(/Wallet A Pool/);
+        }
       } finally {
         await act(async () => pending.resolve());
       }
@@ -330,7 +346,8 @@ describe("VaultRetryQueue", () => {
       const writes = fetchImpl.mock.calls.filter(([, init]) => init.method === "POST");
       expect(writes).toHaveLength(boundary === "creation" ? 1 : 0);
       expect(requestSign).not.toHaveBeenCalled();
-      expect(screen.getByText(/Wallet A Pool/)).toBeInTheDocument();
+      if (transition === "unmount") expect(container).toBeEmptyDOMElement();
+      else expect(screen.getByText(/Wallet A Pool/)).toBeInTheDocument();
       expect(document.querySelector('[data-action-id="act-retry"]')).toBeNull();
     },
   );

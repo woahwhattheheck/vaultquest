@@ -204,7 +204,7 @@ export default function VaultRetryQueue({
   const reloadSequence = useRef({ value: 0 });
   const retryEpoch = useRef(null);
   useLayoutEffect(() => {
-    // A return to the same wallet starts a new epoch; retired retries stay retired.
+    // A return to the same wallet starts a new epoch; retired actions stay retired.
     const epoch = { context };
     retryEpoch.current = epoch;
     return () => {
@@ -335,7 +335,10 @@ export default function VaultRetryQueue({
 
   const handleCancel = useCallback(
     async (action) => {
-      if (!walletAddress) return;
+      const epoch = retryEpoch.current;
+      const isCurrentContext = () =>
+        epoch !== null && retryEpoch.current === epoch && epoch.context === context;
+      if (!walletAddress || !isCurrentContext()) return;
       if (context.inFlightIds.has(action.id)) {
         updateQueue({
           actionError: "Cancel already in progress (duplicate click ignored).",
@@ -349,6 +352,7 @@ export default function VaultRetryQueue({
       try {
         await client.cancelAction(action, {
           walletAddress,
+          isCurrentContext,
         });
         context.dismissedIds.add(action.id);
         updateQueue((previous) => ({
