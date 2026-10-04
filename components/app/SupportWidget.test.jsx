@@ -198,4 +198,41 @@ describe("SupportWidget durable retries", () => {
     expect(rows[0].wallet_address).toBe(walletA);
     expect(screen.getByDisplayValue(DESCRIPTION)).toBeInTheDocument();
   });
+
+  it("rejects malformed acceptance receipts and safely retries the unchanged draft", async () => {
+    const malformed = [
+      [201, { id: { value: "not-a-reference" }, duplicate: false }],
+      [201, { id: 7, duplicate: false }],
+      [201, { id: "   ", duplicate: false }],
+      [201, { status: undefined, duplicate: false }],
+      [201, { status: "pending", duplicate: false }],
+      [201, { duplicate: undefined }],
+      [201, { duplicate: "false" }],
+      [202, { duplicate: false }],
+      [200, { duplicate: false }],
+      [201, { duplicate: true }],
+    ];
+    await openDraft();
+    for (const [status, fields] of malformed) {
+      deliver = async (response) => {
+        const payload = await response.json();
+        return Response.json({ data: { ...payload.data, ...fields } }, { status });
+      };
+      submit();
+      await screen.findByText(/Could not confirm ticket acceptance/);
+      expect(screen.getByDisplayValue(DESCRIPTION)).toBeInTheDocument();
+      expect(screen.queryByText("Ticket Submitted!")).not.toBeInTheDocument();
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Submit Ticket" })).toBeEnabled();
+    }
+
+    deliver = async (response) => response;
+    submit();
+    expect(await screen.findByRole("status")).toHaveTextContent("A matching ticket was already received.");
+    expect(screen.getByDisplayValue(DESCRIPTION)).toBeInTheDocument();
+    expect(new Set(requests.map((input) => input.idempotency_key)).size).toBe(1);
+    const rows = await persisted();
+    expect(rows).toHaveLength(1);
+    expect(screen.getByRole("status")).toHaveTextContent(rows[0].id);
+  });
 });

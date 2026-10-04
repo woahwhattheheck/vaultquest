@@ -171,8 +171,16 @@ export default function SupportWidget() {
         return;
       }
 
-      const id = payload?.data?.id;
-      if (!id) {
+      const ticket = payload?.data;
+      const id = ticket?.id;
+      // A successful HTTP response alone does not confirm durable acceptance.
+      // Keep uncertain replies retryable, with the original draft and key.
+      const accepted = typeof id === "string" && id.trim().length > 0 &&
+        ticket.status === "accepted" && (
+          (res.status === 201 && ticket.duplicate === false) ||
+          (res.status === 200 && ticket.duplicate === true)
+        );
+      if (!accepted) {
         if (ownsDraft()) {
           setSubmitError("Could not confirm ticket acceptance. Your draft was kept — try again.");
         }
