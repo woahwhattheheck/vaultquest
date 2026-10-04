@@ -1,0 +1,128 @@
+name: VQ214 RPC reply validation
+
+on:
+  push:
+    branches: [validation/vq214-rpc-reply-relay17-20261004]
+
+permissions:
+  contents: read
+
+jobs:
+  rpc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - name: Resolve pnpm cache
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - name: Verify exact candidate and accepted dependency inputs
+        run: |
+          mkdir -p evidence
+          node --version | tee evidence/node-version.txt
+          pnpm --version | tee evidence/pnpm-version.txt
+          git rev-parse HEAD | tee evidence/controller-head.txt
+          git rev-parse HEAD^ | tee evidence/product-source.txt
+          test "$(git rev-parse HEAD^)" = "95d45964477969de5ce9d920d8a31694941359d6"
+          test "$(git hash-object lib/customRpc.js)" = "97010788625d770be502bd40713677d0255fbe62"
+          test "$(git hash-object lib/customRpc.test.js)" = "388fd4302fb18250048118f43765ff57ea1be99f"
+          git diff --exit-code abc6d8a4aa13f00ca8333271faa824a3df86af36 -- package.json pnpm-lock.yaml pnpm-workspace.yaml backend/package.json stellar-wallet-connect/package.json
+          sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml backend/package.json stellar-wallet-connect/package.json > evidence/dependencies-before.sha256
+          git ls-files -s > evidence/tracked-inputs.txt
+      - name: Install unchanged canonical workspace
+        timeout-minutes: 7
+        run: |
+          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | tee evidence/frozen-install.log
+          sha256sum -c evidence/dependencies-before.sha256
+          node - <<'JS' | tee evidence/runtime.json
+          const { createRequire } = require('node:module');
+          const vitestPath = require.resolve('vitest/package.json');
+          const local = createRequire(vitestPath);
+          console.log(JSON.stringify({
+            node: process.version,
+            vitest: require(vitestPath).version,
+            vite: local('vite/package.json').version,
+            jsdom: require('jsdom/package.json').version,
+            wagmi: require('wagmi/package.json').version,
+          }, null, 2));
+          JS
+      - name: Reproduce on exact preceding production source
+        timeout-minutes: 2
+        run: |
+          cp lib/customRpc.js "$RUNNER_TEMP/vq214-rpc-candidate.js"
+          git show abc6d8a4aa13f00ca8333271faa824a3df86af36:lib/customRpc.js > lib/customRpc.js
+          test "$(git hash-object lib/customRpc.js)" = "fe2f06a68aad82d3b21efb64d2491e7feae88bff"
+          set +e
+          pnpm exec vitest run lib/customRpc.test.js --maxWorkers=1 --minWorkers=1 --reporter=default --reporter=json --outputFile.json=evidence/before.json 2>&1 | tee evidence/before.log
+          baseline_status=${PIPESTATUS[0]}
+          set -e
+          cp "$RUNNER_TEMP/vq214-rpc-candidate.js" lib/customRpc.js
+          printf '%s\n' "$baseline_status" > evidence/before-exit.txt
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report=json.loads(Path('evidence/before.json').read_text())
+          assert Path('evidence/before-exit.txt').read_text().strip() == '1'
+          assert report['numTotalTests'] == 27, report
+          assert report['numPassedTests'] == 20, report
+          assert report['numFailedTests'] == 7, report
+          assert report.get('numPendingTests',0) == 0, report
+          failed=[case for suite in report['testResults'] for case in suite['assertionResults'] if case['status']=='failed']
+          assert len(failed)==7 and all('rejects invalid JSON-RPC chain reply' in case['fullName'] for case in failed), failed
+          print('BASELINE: 7 reproduced defects; all 20 retained/control cases pass')
+          PY
+      - name: Run complete maintained RPC file on exact candidate
+        timeout-minutes: 2
+        run: |
+          test "$(git hash-object lib/customRpc.js)" = "97010788625d770be502bd40713677d0255fbe62"
+          pnpm exec vitest run lib/customRpc.test.js --maxWorkers=1 --minWorkers=1 --reporter=default --reporter=json --outputFile.json=evidence/after.json 2>&1 | tee evidence/after.log
+          sha256sum -c evidence/dependencies-before.sha256
+          git diff --exit-code
+          git diff --check
+          python3 - <<'PY' | tee evidence/receipt.json
+          import datetime,json,os
+          from pathlib import Path
+          before=json.loads(Path('evidence/before.json').read_text())
+          after=json.loads(Path('evidence/after.json').read_text())
+          assert after['numTotalTests']==27 and after['numPassedTests']==27 and after['numFailedTests']==0, after
+          assert after.get('numPendingTests',0)==0 and after.get('numTodoTests',0)==0, after
+          summary=lambda result:{key:result.get(key,0) for key in ['numTotalTests','numPassedTests','numFailedTests','numPendingTests','numTodoTests']}
+          print(json.dumps({
+            'observedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'runId':os.environ['GITHUB_RUN_ID'],
+            'controller':os.environ['GITHUB_SHA'],
+            'productSource':'95d45964477969de5ce9d920d8a31694941359d6',
+            'baselineSource':'abc6d8a4aa13f00ca8333271faa824a3df86af36',
+            'productionBlob':'97010788625d770be502bd40713677d0255fbe62',
+            'maintainedTestBlob':'388fd4302fb18250048118f43765ff57ea1be99f',
+            'before':summary(before),'after':summary(after),
+            'runtime':json.loads(Path('evidence/runtime.json').read_text()),
+            'scope':'Full existing customRpc test file with real installed dependencies and controlled HTTP replies; no live provider or transaction submission.',
+            'trackedInputsUnchanged':True
+          },indent=2))
+          PY
+      - name: Preserve focused source-bound evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vq214-rpc-reply-relay17
+          path: evidence/
+          retention-days: 14
