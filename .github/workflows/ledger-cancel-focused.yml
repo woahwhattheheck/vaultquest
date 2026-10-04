@@ -1,10 +1,9 @@
-name: Publish retained cancellation source
+name: Publish retry freshness repair
 on:
   push:
     branches: [validation/ledger-cancel-20261004]
 permissions:
   contents: write
-  actions: read
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -16,23 +15,46 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: 093bec9f6e09e4d40e0a55035d2941b5fe42edee
+          ref: ec8a06b1307195de2cdbda44bb0e6c365c90adc7
           path: subject
           fetch-depth: 1
-      - uses: actions/download-artifact@v4
-        with:
-          name: ledger-cancel-postgresql-20261004
-          run-id: 37191663604
-          github-token: ${{ github.token }}
-          path: retained
-      - name: Publish exact retained source, without rerunning tests
+      - name: Publish source already exercised in the client runtime
         working-directory: subject
         run: |
-          python ../controller/publish-retained.py
+          git apply ../controller/retry.patch
+          python - <<'PY'
+          import hashlib
+          import pathlib
+          import subprocess
+          assert subprocess.check_output(['git','rev-parse','HEAD']).decode().strip() == 'ec8a06b1307195de2cdbda44bb0e6c365c90adc7'
+          expected = {
+            'lib/retry-queue-client.js': 'a27c3a7c6fd9d3adab62d95cbc5a966315b4eeed',
+            'components/app/VaultRetryQueue.jsx': '58bc28419d76f596308ec7de8b489e74b0f4f3b4',
+            'lib/retry-queue-client.test.js': '8c2aea061be4d9cb1b2e9bf5370dfd3b756008a2',
+          }
+          for name, sha in expected.items():
+            data=pathlib.Path(name).read_bytes()
+            assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest() == sha
+          assert set(subprocess.check_output(['git','diff','--name-only']).decode().splitlines()) == set(expected)
+          pathlib.Path('docs/RETRY_FRESHNESS.md').write_text('''# Retry parent freshness
+
+          A displayed queue row is not an authoritative preflight. The client now reads the parent when a caller has not supplied a fresh preflight, binds that record to the original action ID and active wallet, applies the existing retry policy, and builds from the freshly read payload. A supplied null record is rejected, not replaced by the displayed row.
+
+          The component no longer catches a failed parent read and silently substitutes stale state. A failed or missing read stops before creating an attempt or invoking the signing callback. Existing duplicate-click ownership and asynchronous wallet-state isolation are unchanged. A matching preflight is reused without a second GET.
+
+          ## Executed client observations
+
+          Node 22.16.0 executed the actual original and repaired client/policy modules with controlled HTTP response fixtures. Eight negative cases (503, transport error, null parent, different parent ID, missing wallet, different wallet, confirmed parent, and an explicit null preflight) all created an attempt and invoked the signing callback before the repair; all eight now stop without a POST or signing callback. Two positive cases (fresh GET and reused matching preflight) each make exactly one POST and invoke signing only when explicitly requested; both use the current amount rather than the stale displayed amount. The reused case makes no additional GET.
+
+          Ten focused behavioral cases passed. The maintained Vitest client file includes the corresponding regression cases and adjusted successful-preflight fixture; the full Vitest suite and React rendering were not executed in this follow-through. No external HTTP request, live wallet signature, dependency installation or application build was performed for this client check.
+
+          This prevents client-side stale-read fallback; it is not a server transaction lock across the interval between preflight and creation. Callers supplying a preflight remain responsible for obtaining it freshly. The existing backend cancellation concurrency fix is independent and preserved.
+          ''')
+          PY
           git config user.name woahwhattheheck
           git config user.email brycembusiness2@gmail.com
-          git add backend/src/services/ledger.ts backend/tests/ledger.spec.ts backend/prisma/schema.prisma docs/LEDGER_CANCELLATION.md
-          git commit -m 'fix(ledger): make cancellation conditional on pending state [skip ci]'
+          git add lib/retry-queue-client.js components/app/VaultRetryQueue.jsx lib/retry-queue-client.test.js docs/RETRY_FRESHNESS.md
+          git commit -m 'fix(retry-queue): reject stale or unreadable parent preflights [skip ci]'
           git rev-parse HEAD
           git rev-parse HEAD^{tree}
-          git push origin HEAD:refs/heads/validation/ledger-cancel-candidate-20261004
+          git push origin HEAD:refs/heads/validation/retry-freshness-candidate-20261004

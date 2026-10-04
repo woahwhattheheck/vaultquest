@@ -1,0 +1,139 @@
+--- a/lib/retry-queue-client.js
++++ b/lib/retry-queue-client.js
+@@ -105,7 +105,21 @@
+         throw err;
+       }
+ 
+-      const fresh = ctx.freshAction || originalRow;
++      // A displayed row is not a fresh ledger read. Reuse only an explicitly
++      // supplied preflight; otherwise read the parent before any write/signing.
++      const fresh = Object.prototype.hasOwnProperty.call(ctx, "freshAction")
++        ? ctx.freshAction
++        : await api.getAction(originalRow.id);
++      if (!fresh || fresh.id !== originalRow.id) {
++        const err = new Error("retry_blocked:invalid_parent_action");
++        err.code = "invalid_parent_action";
++        throw err;
++      }
++      if (!fresh.walletAddress || fresh.walletAddress !== walletAddress) {
++        const err = new Error("retry_blocked:wallet_mismatch");
++        err.code = "wallet_mismatch";
++        throw err;
++      }
+       assertStillRetryable(fresh, {
+         activeWalletAddress: walletAddress,
+         inFlightIds: ctx.inFlightIds,
+@@ -121,7 +135,7 @@
+         throw err;
+       }
+ 
+-      const attempt = buildRetryAttemptPayload(originalRow, {
++      const attempt = buildRetryAttemptPayload(fresh, {
+         idempotencyKey: ctx.idempotencyKey || newIdempotencyKey(),
+       });
+ 
+--- a/components/app/VaultRetryQueue.jsx
++++ b/components/app/VaultRetryQueue.jsx
+@@ -274,10 +274,9 @@
+       try {
+         let fresh = action;
+         if (typeof client.getAction === "function") {
+-          try {
+-            fresh = (await client.getAction(action.id)) || action;
+-          } catch {
+-            fresh = action;
++          fresh = await client.getAction(action.id);
++          if (!fresh) {
++            throw new Error("Could not read the current action; retry was not sent.");
+           }
+         }
+ 
+--- a/lib/retry-queue-client.test.js
++++ b/lib/retry-queue-client.test.js
+@@ -76,10 +76,15 @@
+         token: "USDC",
+       },
+     });
+-    fetchImpl.mockResolvedValue({
+-      ok: true,
+-      text: async () => JSON.stringify({ data: created }),
+-    });
++    fetchImpl
++      .mockResolvedValueOnce({
++        ok: true,
++        text: async () => JSON.stringify({ data: ledgerAction() }),
++      })
++      .mockResolvedValueOnce({
++        ok: true,
++        text: async () => JSON.stringify({ data: created }),
++      });
+ 
+     const requestSign = vi.fn(async () => ({ signed: false }));
+     const original = {
+@@ -103,7 +108,8 @@
+     expect(result.parentActionId).toBe("act-001");
+     expect(result.action.id).toBe("act-retry");
+ 
+-    const [, init] = fetchImpl.mock.calls[0];
++    expect(fetchImpl.mock.calls[0][0]).toContain("/actions/act-001");
++    const [, init] = fetchImpl.mock.calls[1];
+     expect(init.method).toBe("POST");
+     expect(init.headers["Idempotency-Key"]).toBe(
+       "22222222-2222-2222-2222-222222222222"
+@@ -136,6 +142,56 @@
+       code: expect.stringMatching(/already_confirmed|not_replayable_status/),
+     });
+     expect(fetchImpl).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    [null, "invalid_parent_action"],
++    [ledgerAction({ id: "another-action" }), "invalid_parent_action"],
++    [ledgerAction({ wallet_address: null }), "wallet_mismatch"],
++    [ledgerAction({ wallet_address: WALLET_B }), "wallet_mismatch"],
++    [ledgerAction({ status: "confirmed", error_code: null }), "not_replayable_status"],
++  ])("rejects an invalid or terminal fresh parent before writing/signing", async (data, code) => {
++    fetchImpl.mockResolvedValue({ ok: true, text: async () => JSON.stringify({ data }) });
++    const requestSign = vi.fn();
++    await expect(client.createRetryAttempt({
++      id: "act-001", walletAddress: WALLET, status: "failed", errorCode: "RPC_TIMEOUT",
++      type: "deposit", payload: {}, ledger: ledgerAction(),
++    }, { requestSign })).rejects.toMatchObject({ code });
++    expect(fetchImpl).toHaveBeenCalledTimes(1);
++    expect(fetchImpl.mock.calls[0][1].method).toBeUndefined();
++    expect(requestSign).not.toHaveBeenCalled();
++  });
++
++  it("does not use the displayed row when the fresh ledger read fails", async () => {
++    fetchImpl.mockResolvedValue({
++      ok: false, status: 503,
++      text: async () => JSON.stringify({ error: { code: "LEDGER_UNAVAILABLE", message: "unavailable" } }),
++    });
++    const requestSign = vi.fn();
++    await expect(client.createRetryAttempt({
++      id: "act-001", walletAddress: WALLET, status: "failed", errorCode: "RPC_TIMEOUT",
++      type: "deposit", payload: {}, ledger: ledgerAction(),
++    }, { requestSign })).rejects.toMatchObject({ code: "LEDGER_UNAVAILABLE" });
++    expect(fetchImpl).toHaveBeenCalledTimes(1);
++    expect(fetchImpl.mock.calls[0][1].method).toBeUndefined();
++    expect(requestSign).not.toHaveBeenCalled();
++  });
++
++  it("reuses a matching fresh preflight and builds from its authoritative payload", async () => {
++    fetchImpl.mockResolvedValue({
++      ok: true, text: async () => JSON.stringify({ data: ledgerAction({ id: "act-retry", status: "pending" }) }),
++    });
++    const original = {
++      id: "act-001", walletAddress: WALLET, status: "failed", errorCode: "RPC_TIMEOUT",
++      type: "deposit", payload: { amount: "stale" }, ledger: ledgerAction(),
++    };
++    await client.createRetryAttempt(original, {
++      freshAction: { ...original, payload: { vault_id: "v1", amount: "500", token: "USDC" } },
++    });
++    expect(fetchImpl).toHaveBeenCalledTimes(1);
++    const [, init] = fetchImpl.mock.calls[0];
++    expect(init.method).toBe("POST");
++    expect(JSON.parse(init.body).action_payload.amount).toBe("500");
+   });
+ 
+   it("cancels pending actions and treats repeat cancel as idempotent", async () => {
