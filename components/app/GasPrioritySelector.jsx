@@ -108,6 +108,7 @@ export default function GasPrioritySelector({
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
 
     async function loadFees() {
       if (isUnsupported) {
@@ -124,6 +125,7 @@ export default function GasPrioritySelector({
           const result = await fetchStellarFeeStats({
             networkType,
             customHorizonUrl,
+            signal: controller.signal,
           });
           if (cancelled) return;
           setFeeNow(Date.now());
@@ -173,6 +175,7 @@ export default function GasPrioritySelector({
     loadFees();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [
     customHorizonUrl,
