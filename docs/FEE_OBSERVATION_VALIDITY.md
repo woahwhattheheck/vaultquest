@@ -158,3 +158,64 @@ existing focused fee command for these exact generated sources. Other
 pre-existing peer warnings remain; the peer checks establish the specific
 Solana and WalletConnect bindings above. They do not exercise wallet
 connections, a full application build or live-chain behavior.
+
+## Observation-time continuation — October 4, 2026
+
+The Stellar estimate and freshness classifier now share the same observation
+time validation. An invalid date, a non-finite caller clock, or a sample ahead
+of that clock has unknown age (`ageMs: null`) and is stale. An invalid date
+also produces `freshness: null`, so formatting the estimate does not throw.
+A valid timestamp ahead of the caller clock is still reported as its original
+ISO timestamp; it is not changed into a zero-age observation.
+
+Valid zero-age samples remain fresh. The existing 60,000 ms threshold is
+unchanged: 59,999 ms is fresh and 60,000 ms is stale. Ledger requirements,
+unsupported-network precedence, all fee arithmetic, provider validation, the
+selector's context/expiry handling and the canonical dependency files remain
+unchanged.
+
+### Focused execution
+
+The unchanged production source from parent
+`08915ce6cf89fcbc238319599d77ff41ff30bc7b` was compared with this repair using
+the same maintained `lib/chain-fee-adapters.test.js` file. The file contains
+the eight original cases plus four observation-time regressions.
+
+| Source | Passed | Failed |
+| --- | ---: | ---: |
+| Parent | 9 | 3 |
+| Repair | 12 | 0 |
+
+The parent failures are the malformed observation date, future observation,
+and invalid caller-clock cases. The zero-age/exact-threshold regression and
+all eight original cases pass on both sources. The repaired cases exercise
+both `classifyFeeFreshness` and `buildStellarFeeEstimate`; no test was removed
+or skipped.
+
+Exact Git blobs used in the final comparison:
+
+| File | Git blob |
+| --- | --- |
+| Parent adapter | `0d1c722179059f827330cf8d508de0675c2c2967` |
+| Repaired adapter | `a855bc6422a9c4f062f4d476c7e2bb8dd41bb7ae` |
+| Maintained test file with regressions | `81c0b0b9e9877bb307f294f09a2447d4607d28cc` |
+
+Execution used Node 24.19.0 and an already-installed Vitest 4.1.10 with its
+Vite 8.1.5, in an isolated Node environment. The actual adapter and
+`customRpc.js` were imported through an `@/lib` alias. The unrelated
+`wagmi/chains` import was supplied only its two static Avalanche RPC
+constants; wallet/chain integration was not exercised. Temporary/cache
+directories were on cloud memory storage because the shared filesystem was
+full; initial runner attempts stopped before test collection until that
+temporary directory was configured. No dependencies were installed or changed.
+
+The maintained repository command for this file is:
+
+```sh
+pnpm exec vitest run lib/chain-fee-adapters.test.js
+```
+
+The execution above uses the isolated runtime described here, not the earlier
+canonical pnpm environment. It does not repeat or extend the prior 67-case
+component/installation acceptance, and does not claim a mounted selector,
+browser, provider, transaction, application build, or performance result.
