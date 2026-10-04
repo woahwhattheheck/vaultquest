@@ -238,3 +238,72 @@ gap for this source. It does not establish a full Next application build,
 whole-repository test pass, browser/E2E, authenticated backend/Postgres,
 signing-provider, live chain, deployment, upstream acceptance, award or payment
 result. No baseline replay or additional test suite was run.
+
+## Cancellation context retirement — 2026-10-04
+
+Product commit `c66968bc262671a4dc6905e5ed3725256feabe6d` extends the
+existing committed wallet/client epoch guard to cancellation. It is a
+sole-parent successor of `a9e22ed32e7cbc9647417ca15ab281f196cceccf` and
+preserves the preceding dependency and backend changes.
+
+Previously, cancellation paused during the action read or awaited
+authentication could still send its POST after the component unmounted or
+the wallet changed from A to B and back to A. The component now passes its
+captured epoch into `cancelAction`; the client checks that context at entry,
+after the preflight, and after awaited authentication immediately before
+dispatch. A retired operation reports `cancel_blocked:wallet_context_changed`.
+Returning to the same address does not reactivate an earlier epoch.
+A POST already dispatched before a context change cannot be recalled.
+
+### Focused execution
+
+[Run 37201744570, job 111434679505](https://github.com/woahwhattheheck/vaultquest/actions/runs/37201744570/job/111434679505)
+passed using Node **22.23.3**, pnpm **10.28.2**, and Vitest **3.2.7** after
+normal `pnpm install --frozen-lockfile`. The existing workspace, lockfile,
+manifests, test configuration and wallet-store import were unchanged.
+The isolated validation controller is
+`1f17799caad9cb9ffc838fcd5ea75e2e5fbf68ed`; its workflow is outside this PR.
+The first runner attempt stopped in package-manager setup before installation
+or tests because of a redundant version declaration; the corrected controller
+uses the repository's existing `packageManager` value.
+
+The existing parameterized component test gained four cancellation cases:
+preflight or authentication paused across either an A → B → A wallet
+transition or unmount. Against the parent client/component, **all four
+failed because one cancellation POST was sent where zero was expected**.
+With the repaired source, the existing client/component selection passed:
+
+```bash
+pnpm exec vitest run \
+  lib/retry-queue-client.test.js \
+  components/app/VaultRetryQueue.test.jsx
+```
+
+| Selected file | Passed | Failed | Pending |
+| --- | ---: | ---: | ---: |
+| `lib/retry-queue-client.test.js` | 12 | 0 | 0 |
+| `components/app/VaultRetryQueue.test.jsx` | 29 | 0 | 0 |
+| **Total** | **41** | **0** | **0** |
+
+The runner used JSON reporting and checked the four baseline failures and
+the 41/0/0 repaired result. These counts describe this two-file execution;
+the preceding 50-case policy/client/component receipt remains historical
+at its own source pin.
+
+| Executed changed source | Git blob |
+| --- | --- |
+| `lib/retry-queue-client.js` | `7a20fcb12cc904e61503ec8e6225ab39e1402e5a` |
+| `components/app/VaultRetryQueue.jsx` | `080ba6439df325171daaf32a45a6922f1f5bbf33` |
+| `components/app/VaultRetryQueue.test.jsx` | `33fd0d126546af8c0761d6c32eb3bb2100189966` |
+
+[Artifact 11303416262](https://github.com/woahwhattheheck/vaultquest/actions/runs/37201744570/artifacts/11303416262)
+contains the before/after JSON reports and logs, runtime record and source
+receipt. Its downloaded **4,531-byte** ZIP was checked against SHA-256
+`c7a3edc07a8d00cf874719d57a3ec3578584bf034e5e673c84c8b039a84eb1df`;
+the four baseline failure messages and 12 + 29 passing results were read
+from that archive.
+
+This exercises the mounted React component with the production client,
+policy and wallet store, controlled ledger transport and awaited
+authentication. It does not establish live wallet/server/chain execution,
+a full application build, product performance, upstream acceptance or payment.
