@@ -1,0 +1,51 @@
+name: VaultQuest Stellar fee observation
+on:
+  push:
+    branches: [validation/vq214-fees-38ec-20261004]
+permissions:
+  contents: write
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: woahwhattheheck/vaultquest
+          ref: bc3ce9c1e33d3f2692b34a0cdcef42262e866dd2
+          path: subject
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: subject/pnpm-lock.yaml
+      - name: Install existing locked frontend dependencies
+        working-directory: subject
+        run: pnpm install --frozen-lockfile --ignore-scripts --filter vaultquest...
+      - name: Reproduce and repair the actual fee observation path
+        run: python controller/repair.py subject evidence
+      - name: Retain tested source on a new candidate ref only
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import base64, os, pathlib, subprocess
+          sha=pathlib.Path('evidence/candidate.txt').read_text().strip()
+          env=dict(os.environ,GIT_CONFIG_COUNT='1',GIT_CONFIG_KEY_0='http.https://github.com/.extraheader')
+          env['GIT_CONFIG_VALUE_0']='AUTHORIZATION: basic '+base64.b64encode(('x-access-token:'+os.environ['GH_TOKEN']).encode()).decode()
+          subprocess.run(['git','push','https://github.com/woahwhattheheck/vaultquest.git',sha+':refs/heads/candidate/vq214-fees-38ec-20261004'],cwd='subject',env=env,check=True)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vq214-fee-observation-evidence
+          path: evidence
+          retention-days: 14
