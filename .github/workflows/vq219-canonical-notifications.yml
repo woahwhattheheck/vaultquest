@@ -1,0 +1,85 @@
+name: Notification canonical workspace acceptance
+
+on:
+  push:
+    branches: [validation/vq219-canonical-pnpm-alder-20261004]
+
+permissions:
+  contents: read
+
+jobs:
+  notifications:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE: 256715910fac87e919b60e2b1f834f52e791605c
+      DONOR: 08915ce6cf89fcbc238319599d77ff41ff30bc7b
+      DONOR_BASE: 13992798d927883579f8c4c4505069b4f34b249b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind the unchanged feature and compatible dependency donor
+        run: |
+          mkdir -p evidence
+          git fetch --no-tags --depth=1 origin "$DONOR" "$DONOR_BASE"
+          python3 - <<'PY' | tee evidence/source-binding.json
+          import json, os, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          source, donor, old = (os.environ[k] for k in ('SOURCE', 'DONOR', 'DONOR_BASE'))
+          manifests = ['package.json', 'backend/package.json', 'stellar-wallet-connect/package.json']
+          identity = {}
+          for path in manifests:
+              a, b = git('rev-parse', source + ':' + path), git('rev-parse', donor + ':' + path)
+              assert a == b, ('workspace manifest differs', path, a, b)
+              identity[path] = a
+          expected = {'pnpm-workspace.yaml': '24b0f88d509b3fb6d4b62ce0918366697aacaf7f', 'pnpm-lock.yaml': '8c60c191836213cf9024f4c65616fbf59537e756'}
+          for path, blob in expected.items():
+              assert git('rev-parse', 'HEAD:' + path) == git('rev-parse', donor + ':' + path) == blob
+              assert git('rev-parse', source + ':' + path) == git('rev-parse', old + ':' + path), ('different original dependency source', path)
+          changed = set(git('diff', '--name-only', source, 'HEAD').splitlines())
+          assert changed == set(expected) | {'.github/workflows/vq219-canonical-notifications.yml'}, changed
+          print(json.dumps({'source': source, 'donor': donor, 'donorBase': old, 'controller': git('rev-parse', 'HEAD'), 'manifestBlobs': identity, 'dependencyBlobs': expected, 'changedPaths': sorted(changed)}, indent=2))
+          PY
+          git diff "$SOURCE" HEAD -- pnpm-workspace.yaml pnpm-lock.yaml > evidence/dependency-composition.patch
+          git ls-files -s > evidence/source-manifest.txt
+          sha256sum pnpm-workspace.yaml pnpm-lock.yaml > evidence/dependencies-before.sha256
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - name: Install the complete canonical workspace
+        timeout-minutes: 5
+        run: |
+          node --version | tee evidence/node-version.txt
+          pnpm --version | tee evidence/pnpm-version.txt
+          test "$(pnpm --version)" = 10.28.2
+          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | tee evidence/frozen-install.log
+          sha256sum -c evidence/dependencies-before.sha256
+          node - <<'JS' | tee evidence/runner-versions.json
+          const { createRequire } = require('node:module');
+          const vitest = require.resolve('vitest/package.json');
+          const local = createRequire(vitest);
+          console.log(JSON.stringify({ node: process.version, vitest: require(vitest).version, vite: local('vite/package.json').version, jsdom: require('jsdom/package.json').version }, null, 2));
+          JS
+      - name: Run the existing notification acceptance selection
+        timeout-minutes: 3
+        run: |
+          pnpm exec vitest run lib/notification-prefs.test.js lib/notification-prefs-client.test.js lib/notification-producers.test.js lib/notification-proxy.test.js components/app/VaultNotificationSettings.test.jsx app/app/notifications/page.test.jsx --reporter=default --reporter=json --outputFile.json=evidence/notification-tests.json 2>&1 | tee evidence/notification-tests.log
+          sha256sum -c evidence/dependencies-before.sha256
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Retain the actual source identities and execution results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vq219-canonical-notifications
+          path: evidence/
+          retention-days: 7
