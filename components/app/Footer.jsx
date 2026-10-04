@@ -1,7 +1,7 @@
 "use client";
 
-import { useTranslation } from "next-i18next";
-import { useRouter } from "next/navigation";
+import { useTranslation } from "react-i18next";
+import { useLocale } from "@/components/providers/LocaleProvider";
 
 const LOCALES = [
   { code: "en", label: "English" },
@@ -12,7 +12,7 @@ const LOCALES = [
 
 export default function Footer() {
   const { t } = useTranslation("common");
-  const router = useRouter();
+  const { locale, setLocale } = useLocale();
 
   return (
     <footer className="border-t border-vault-border/60 bg-vault-surface/60">
@@ -25,11 +25,8 @@ export default function Footer() {
           <span className="text-vault-muted">{t("footer.language")}:</span>
           <select
             className="rounded-md border border-vault-border bg-vault-bg px-2 py-1 text-vault-text"
-            defaultValue="en"
-            onChange={(e) => {
-              const code = e.target.value;
-              router.push(`/${code}`);
-            }}
+            value={locale}
+            onChange={(e) => setLocale(e.target.value)}
           >
             {LOCALES.map(({ code, label }) => (
               <option key={code} value={code}>
