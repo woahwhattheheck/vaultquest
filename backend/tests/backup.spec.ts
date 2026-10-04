@@ -129,6 +129,40 @@ function makeLeaseHarness(jobName: string) {
 // ─── Core Backup & Manifest Generation ───────────────────────────────────────
 
 describe("BackupService core execution & manifest generation", () => {
+  it.each([
+    {
+      databaseUrl: "postgres://ops%40tenant:p%40ss@db.example.com:5433/vault%20quest",
+      username: "ops@tenant", database: "vault quest", password: "p@ss"
+    },
+    {
+      databaseUrl: "postgres://ops%2540tenant:p%2540ss@db.example.com:5433/vault%2520quest",
+      username: "ops%40tenant", database: "vault%20quest", password: "p%40ss"
+    }
+  ])("decodes connection URL components exactly once for $database", async ({ databaseUrl, username, database, password }) => {
+    const spawn = vi.fn<SpawnFn>().mockResolvedValue({ exitCode: 0, stderr: "" });
+    const svc = new BackupService({
+      backupDir: BACKUP_DIR, databaseUrl, spawn, fs: makeFs(),
+      pgRestorePath: "/opt/postgres/pg_restore", now: () => FIXED_NOW
+    });
+    const backup = await svc.run();
+    expect(backup.manifest.databaseName).toBe(database);
+    expect(spawn.mock.calls[0]?.[1]).toEqual(expect.arrayContaining(["--dbname", database]));
+
+    const lease = makeLeaseHarness("restore-drill");
+    const result = await lease.service("url-components").runWithLease("restore-drill", (ctx) =>
+      svc.runRestoreDrill({ dumpFilePath: backup.filePath }, ctx));
+    expect(result.status).toBe("ran");
+    expect(spawn.mock.calls.map(([command]) => command)).toEqual([
+      "pg_dump", "/opt/postgres/createdb", "/opt/postgres/pg_restore", "/opt/postgres/dropdb"
+    ]);
+    for (const [, args, env] of spawn.mock.calls) {
+      expect(args).toEqual(expect.arrayContaining([
+        "--host", "db.example.com", "--port", "5433", "--username", username
+      ]));
+      expect(env.PGPASSWORD).toBe(password);
+    }
+  });
+
   it("creates dump, manifest, and SHA-256 checksums", async () => {
     const spawn = makeSpawn(0);
     const fs = makeFs();

@@ -862,7 +862,7 @@ export class BackupService {
     const args = [
       "--host", url.hostname || "localhost",
       "--port", url.port || "5432",
-      "--username", url.username || "postgres",
+      "--username", decodeURIComponent(url.username) || "postgres",
       "--no-password",
       ...(command === "dropdb" ? ["--if-exists"] : []),
       "--",
@@ -930,7 +930,7 @@ export class BackupService {
   private extractDatabaseName(): string {
     try {
       const url = new URL(this.databaseUrl);
-      return url.pathname.replace(/^\//, "") || "postgres";
+      return decodeURIComponent(url.pathname.replace(/^\//, "")) || "postgres";
     } catch {
       return "postgres";
     }
@@ -944,8 +944,8 @@ export class BackupService {
 
     const host = url.hostname || "localhost";
     const port = url.port || "5432";
-    const database = url.pathname.replace(/^\//, "") || "postgres";
-    const username = url.username || "postgres";
+    const database = decodeURIComponent(url.pathname.replace(/^\//, "")) || "postgres";
+    const username = decodeURIComponent(url.username) || "postgres";
     const password = decodeURIComponent(url.password || "");
 
     const pgArgs = [
@@ -976,7 +976,7 @@ export class BackupService {
 
     const host = url.hostname || "localhost";
     const port = url.port || "5432";
-    const username = url.username || "postgres";
+    const username = decodeURIComponent(url.username) || "postgres";
     const password = decodeURIComponent(url.password || "");
 
     const pgArgs = [
