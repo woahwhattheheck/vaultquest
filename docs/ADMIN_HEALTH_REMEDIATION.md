@@ -81,6 +81,16 @@ Indexer soft/hard lag thresholds follow [`INDEXER_RUNBOOK.md`](./INDEXER_RUNBOOK
 (soft ≥ 100 ledgers → stale, hard ≥ 500 or `last_error` → degraded). Use that
 runbook for checkpoint inspection, Horizon 429 recovery, and ledger rewind.
 
+A missing or invalid recorded `last_success_sync_time` is returned as `null`
+and degraded; the health reader does not substitute the observation time.
+The zero `sync_lag` placeholder in this state, as in the no-checkpoint state,
+does not establish freshness. Failed updates to an existing cached checkpoint
+preserve its previous successful-sync timestamp even when the caller supplies
+both the event ID and error explicitly. Only a successful update advances that
+recorded history. Existing recorded-success lag and error handling are unchanged.
+This does not migrate old checkpoint data or change first-checkpoint persistence
+defaults; stored timestamps from older writers are not retroactively validated.
+
 ```bash
 curl -s "${NEXT_PUBLIC_BACKEND_URL:-http://localhost:3001}/health/indexer" | jq .
 ```
