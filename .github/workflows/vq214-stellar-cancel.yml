@@ -1,0 +1,143 @@
+name: VQ214 Stellar request cancellation
+on:
+  push:
+    branches: [validation/vq214-stellar-cancel-20261004]
+permissions:
+  contents: write
+jobs:
+  cancellation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - name: Resolve pnpm cache
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - name: Bind baseline and unchanged workspace
+        run: |
+          mkdir -p evidence
+          test "$(git rev-parse HEAD^)" = "866308adfd78bf01d7827ef7a3933d682913058d"
+          test "$(git hash-object lib/chain-fee-adapters.js)" = "a855bc6422a9c4f062f4d476c7e2bb8dd41bb7ae"
+          test "$(git hash-object components/app/GasPrioritySelector.jsx)" = "eb2dcee484afadc62a5849ee2969c15e88ac25a2"
+          test "$(git hash-object components/app/GasPrioritySelector.abort.test.jsx)" = "8365af75685aa6fab0842943bc6f20397f1f35ec"
+          git diff --exit-code HEAD^ -- package.json pnpm-lock.yaml pnpm-workspace.yaml backend/package.json stellar-wallet-connect/package.json
+          sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml backend/package.json stellar-wallet-connect/package.json > evidence/dependencies.sha256
+          git ls-files -s > evidence/tracked-inputs.txt
+      - name: Install canonical dependencies
+        timeout-minutes: 7
+        run: |
+          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | tee evidence/install.log
+          sha256sum -c evidence/dependencies.sha256
+          node - <<'JS' | tee evidence/runtime.json
+          const { createRequire } = require('node:module');
+          const vitestPath = require.resolve('vitest/package.json');
+          const local = createRequire(vitestPath);
+          console.log(JSON.stringify({ node: process.version, vitest: require(vitestPath).version,
+            vite: local('vite/package.json').version, jsdom: require('jsdom/package.json').version,
+            react: require('react/package.json').version, wagmi: require('wagmi/package.json').version }, null, 2));
+          JS
+          pnpm --version | tee evidence/pnpm-version.txt
+      - name: Reproduce both missing-cancellation assertions
+        run: |
+          set +e
+          pnpm exec vitest run components/app/GasPrioritySelector.abort.test.jsx --maxWorkers=1 --minWorkers=1 --reporter=default --reporter=json --outputFile.json=evidence/before.json 2>&1 | tee evidence/before.log
+          code=${PIPESTATUS[0]}
+          set -e
+          test "$code" = 1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('evidence/before.json').read_text())
+          assert r['numTotalTests']==2 and r['numFailedTests']==2 and r['numPassedTests']==0,r
+          assert r.get('numPendingTests',0)==0 and r.get('numTodoTests',0)==0,r
+          failed=[t for s in r['testResults'] for t in s['assertionResults'] if t['status']=='failed']
+          assert len(failed)==2 and all('expected undefined to be false' in '\n'.join(t['failureMessages']) for t in failed),failed
+          print('BASELINE: both actual React cases fail because no AbortSignal reaches fetch')
+          PY
+      - name: Apply exact pinned cancellation patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          files={
+            'components/app/GasPrioritySelector.jsx':('49bcb082e9b6a7f5256486842e67ae9201d2d964',[
+              ('    let cancelled = false;\n','    let cancelled = false;\n    const controller = new AbortController();\n'),
+              ('            customHorizonUrl,\n          });','            customHorizonUrl,\n            signal: controller.signal,\n          });'),
+              ('      cancelled = true;\n','      cancelled = true;\n      controller.abort();\n')]),
+            'lib/chain-fee-adapters.js':('7ddd6ef7c0d7a76c9277bd7e59adf110e9d5d355',[
+              (' * Fetch Stellar fee stats from Horizon.\n',' * Fetch Stellar fee stats from Horizon. An optional signal cancels obsolete reads.\n'),
+              ('  customHorizonUrl,\n  fetchImpl = fetch,','  customHorizonUrl,\n  signal,\n  fetchImpl = fetch,'),
+              ('    headers: { accept: "application/json" },\n','    headers: { accept: "application/json" },\n    ...(signal ? { signal } : {}),\n')])}
+          for name,(expected,replacements) in files.items():
+            path=Path(name); text=path.read_text()
+            for old,new in replacements:
+              assert text.count(old)==1,(name,old)
+              text=text.replace(old,new)
+            raw=text.encode(); actual=hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest()
+            assert actual==expected,(name,actual,expected)
+            path.write_bytes(raw)
+          PY
+          git diff --check
+          git diff > evidence/product.patch
+      - name: Execute both actual React cancellation cases
+        run: |
+          pnpm exec vitest run components/app/GasPrioritySelector.abort.test.jsx --maxWorkers=1 --minWorkers=1 --reporter=default --reporter=json --outputFile.json=evidence/after.json 2>&1 | tee evidence/after.log
+          sha256sum -c evidence/dependencies.sha256
+          git diff --exit-code -- . ':!lib/chain-fee-adapters.js' ':!components/app/GasPrioritySelector.jsx'
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('evidence/after.json').read_text())
+          assert r['numTotalTests']==2 and r['numPassedTests']==2 and r['numFailedTests']==0,r
+          assert r.get('numPendingTests',0)==0 and r.get('numTodoTests',0)==0,r
+          print('CANDIDATE: source-change cancellation, new live signal, successful replacement rendering and unmount cancellation pass')
+          PY
+      - name: Upload only the two validated source objects
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY' | tee evidence/receipt.json
+          import base64,datetime,hashlib,json,os,urllib.request
+          from pathlib import Path
+          files={'lib/chain-fee-adapters.js':'7ddd6ef7c0d7a76c9277bd7e59adf110e9d5d355','components/app/GasPrioritySelector.jsx':'49bcb082e9b6a7f5256486842e67ae9201d2d964'}
+          repo=os.environ['GITHUB_REPOSITORY']
+          assert repo=='woahwhattheheck/vaultquest'
+          uploaded={}
+          for name,expected in files.items():
+            raw=Path(name).read_bytes()
+            assert hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest()==expected
+            payload=json.dumps({'encoding':'base64','content':base64.b64encode(raw).decode()}).encode()
+            request=urllib.request.Request(f'https://api.github.com/repos/{repo}/git/blobs',data=payload,method='POST',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'})
+            with urllib.request.urlopen(request,timeout=30) as response:
+              result=json.load(response)
+            assert result['sha']==expected,result
+            uploaded[name]=expected
+          before=json.loads(Path('evidence/before.json').read_text()); after=json.loads(Path('evidence/after.json').read_text())
+          keys=['numTotalTests','numPassedTests','numFailedTests','numPendingTests','numTodoTests']
+          print(json.dumps({'observedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),'runId':os.environ['GITHUB_RUN_ID'],'controller':os.environ['GITHUB_SHA'],'baseline':'866308adfd78bf01d7827ef7a3933d682913058d','sourceBlobs':uploaded,'testBlob':'8365af75685aa6fab0842943bc6f20397f1f35ec','before':{k:before.get(k,0) for k in keys},'after':{k:after.get(k,0) for k in keys},'runtime':json.loads(Path('evidence/runtime.json').read_text()),'scope':'Two real React lifecycle cases with installed canonical dependencies and controlled fetch responses. No live Horizon, whole-app or quota-performance claim.','publication':'Only content-addressed blobs uploaded; no ref, PR, release or deployment mutation.'},indent=2))
+          PY
+      - name: Retain focused evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vq214-stellar-cancel-before-after
+          path: evidence/
+          retention-days: 14
