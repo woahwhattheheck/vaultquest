@@ -160,10 +160,11 @@ export class CacheService {
   private evictIfNeeded<K, V>(map: Map<K, CacheEntry<V>>): void {
     if (map.size <= this.maxEntries) return;
     let oldestKey: K | undefined;
-    let oldest = new Date(map.size ? Infinity : 0);
+    let oldest = Infinity;
     for (const [k, entry] of map.entries()) {
-      if (entry.accessedAt < oldest) {
-        oldest = entry.accessedAt;
+      const accessedAt = entry.accessedAt.getTime();
+      if (accessedAt < oldest) {
+        oldest = accessedAt;
         oldestKey = k;
       }
     }
