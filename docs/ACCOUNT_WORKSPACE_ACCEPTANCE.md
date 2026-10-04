@@ -92,3 +92,46 @@ The installer still reports ignored package scripts for
 `keccak@3.0.4` under the retained policy. No approval was granted. The donor
 report's other peer warnings and scope limits are not a blanket dependency
 compatibility or security certification.
+
+## Mismatch-only fixture guidance (October 4, 2026)
+
+An explicitly authorized `?networkMismatch=true` fixture can represent a
+network mismatch while the wallet provider is disconnected. The account
+resolver already supported that state, but neither rendering branch displayed
+its guidance. The disconnected branch now passes the existing mismatch and
+disconnect flags to `WalletReconnectGuidance` when either is active. It keeps
+the empty account view and does not create a connected dashboard.
+
+The fixture gate, wallet provider, helper, dependency files and prior cases
+are unchanged. Two cases were added to the existing component file. Both run
+with production mode and the build-time override disabled; only the runtime
+E2E authorization differs. The authorized case shows mismatch guidance, while
+the unauthorized URL retains ordinary disconnected guidance.
+
+[Run 37201649307](https://github.com/woahwhattheheck/vaultquest/actions/runs/37201649307)
+reused the released canonical account controller on source
+`fcd85bdefc1f6f20859187832b56dec586d04977`, with the two candidate files.
+Its [job log](https://github.com/woahwhattheheck/vaultquest/actions/runs/37201649307/job/111434395531)
+records these results:
+
+| Selection | Observed result |
+| --- | --- |
+| Previous page with only the two new `mismatch-only` cases selected | Authorized case failed; unauthorized case passed. Six existing component cases were not selected. |
+| Repaired page, complete existing account helper/component selection | **23 passed**, zero failed or skipped: 15 helper cases and 8 component cases. |
+
+The single frozen installation included all three workspaces and preserved the
+dependency bytes. The run used Node 22.23.3, pnpm 10.28.2, Vitest 3.2.7,
+Vite 6.4.3 and jsdom 25.0.1. The repaired selection reported 1.57 seconds;
+this is an execution observation, not a performance comparison.
+
+The exercised page blob is `be5e9e794b2bc0c50f6ebe296810e4e9e130ebcd`;
+the component-test blob is `c2472f12d1c90b4b9294bb9092da3b6591e9c742`.
+The [controller source](https://github.com/woahwhattheheck/vaultquest/blob/fb995d5640ec74a971ac5d14bdf74fc6613ce633/.github/workflows/vq217-canonical-account.yml)
+retains the exact baseline and repaired commands. Logs, JSON results and source
+binding are in artifact `11302828724` on that run, with seven-day retention.
+
+This is mounted component/helper execution using the maintained isolation of
+unrelated widgets and wallet controls. No new full Next build, browser capture,
+live-wallet interaction, deployed-service result or award/payment is claimed.
+Earlier browser and production-fixture compilation evidence remains bound to
+its recorded sources.

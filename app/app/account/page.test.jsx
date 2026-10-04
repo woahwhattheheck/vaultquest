@@ -98,6 +98,33 @@ describe("AccountPage", () => {
       expect(screen.getByText("position-summary")).toBeInTheDocument();
     });
   });
+  it.each([true, false])(
+    "keeps mismatch-only production URL fixtures gated when runtime authorization is %s",
+    async (runtimeAuthorized) => {
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("NEXT_PUBLIC_ALLOW_ACCOUNT_TEST_FIXTURES", "false");
+      window.__VQ_ALLOW_ACCOUNT_TEST_FIXTURES__ = runtimeAuthorized;
+      window.history.replaceState({}, "", "/app/account?networkMismatch=true");
+
+      try {
+        render(<AccountPage />);
+        expect(await screen.findByText(/Wallet not connected/i)).toBeInTheDocument();
+        expect(screen.queryByText("position-summary")).not.toBeInTheDocument();
+
+        if (runtimeAuthorized) {
+          expect(await screen.findByText("mismatch-guidance")).toBeInTheDocument();
+          expect(screen.queryByText("disconnect-guidance")).not.toBeInTheDocument();
+        } else {
+          expect(screen.queryByText("mismatch-guidance")).not.toBeInTheDocument();
+          expect(screen.getByText("disconnect-guidance")).toBeInTheDocument();
+        }
+      } finally {
+        vi.unstubAllEnvs();
+        delete window.__VQ_ALLOW_ACCOUNT_TEST_FIXTURES__;
+      }
+    },
+  );
+
   it("tracks supported, unsupported and disconnected states through real wagmi hooks", async () => {
     const { createConfig, createConnector, WagmiProvider, useAccount, useChainId } =
       await vi.importActual("wagmi");
