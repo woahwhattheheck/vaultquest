@@ -67,3 +67,27 @@ The retained runtime uses Node 24.19.0, Vitest 2.1.9, Vite 5.4.21, jsdom 25.0.1,
 The retained Testing Library React is 16.3.2 (manifest: ^14.3.1), and Lucide is 0.378.0 (manifest: ^0.460.0). The local validation configuration deduplicates React, uses the existing widget test factories, and supplies a small RainbowKit modal fixture. These are local validation settings; no dependency, lockfile, wallet-provider configuration, or production test-fixture mechanism changes are included.
 
 No wallet signing, chain RPC, transaction, authenticated backend, or deployed service is exercised. Full Next application build, full workspace unit/route/Playwright suites and the sponsor Node 20 matrix are not claimed.
+
+## Production fixture inlining follow-through (October 4, 2026)
+
+Source commit `45fe7b1630350be8ce60863e4900949365ff29b8` corrects a separate browser-only fixture-gate defect. The previous helper accepted `env = process.env` and accessed the two environment members through that alias. Next's [documented browser inlining](https://nextjs.org/docs/app/guides/environment-variables#bundling-environment-variables-for-the-browser) does not replace aliased lookups. An empty browser environment consequently made `env.NODE_ENV !== "production"` true and enabled the hostile URL overrides.
+
+The default argument now reads `process.env.NODE_ENV` and `process.env.NEXT_PUBLIC_ALLOW_ACCOUNT_TEST_FIXTURES` directly so the compiler can substitute them. Explicit injected environments, development fixtures, the supported runtime E2E flag, wallet providers and the preceding live-chain correction remain unchanged.
+
+[Hosted run 37191885726](https://github.com/woahwhattheheck/vaultquest/actions/runs/37191885726) executed the retained `scripts/check-account-fixture-bundle.cjs` with Next 14.2.33 / webpack 5.90.0, installed in an isolated compiler directory without changing the project manifest or lockfile. It compiled the actual earlier and candidate helper files with `DefinePlugin` and executed the resulting browser-targeted bundles with an empty runtime environment.
+
+The earlier helper reproduced the hostile-URL acceptance. The candidate passed eight assertions: production gate denial, rejection of both hostile query overrides, disconnected state, supported-chain state, unsupported-chain mismatch, runtime E2E opt-in, build-time E2E opt-in and development fixtures. Exact helper identities:
+
+- Earlier Git blob: `d88b81633936e45756eede391f7df3b68d01d677`.
+- Checked candidate Git blob: `b9ebabb8f2179af88c9588dc9bf2e5d4df0df91f`.
+- Downloaded evidence ZIP SHA-256: `8adadb89ea8ea22c9708eebf5ced15a044b8bd7b46e833c73ded03d6283863b3`.
+
+Replay after installing the existing project dependencies:
+
+```bash
+node scripts/check-account-fixture-bundle.cjs
+# Optional earlier source file, to reproduce the old gate in the same check:
+node scripts/check-account-fixture-bundle.cjs lib/account-wallet-state.js /path/to/earlier-helper.js
+```
+
+This is a focused webpack/browser-boundary check, not a full Next application build, Turbopack check, React hydration test, live-wallet run, or execution against the lockfile's Next 16.3.3. The preceding 21-test and browser-recording results remain historical source-scoped evidence; they were not rerun for this follow-through. The temporary validation workflow was kept off the contribution branch.
