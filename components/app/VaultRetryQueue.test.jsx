@@ -240,6 +240,101 @@ describe("VaultRetryQueue", () => {
       }
     },
   );
+  it.each(["preflight", "authentication", "creation"])(
+    "retires a retry paused at %s after switching away and back to the same wallet",
+    async (boundary) => {
+      const original = {
+        id: "act-001",
+        wallet_address: WALLET,
+        action_type: "deposit",
+        action_payload: {
+          vault_id: "v1",
+          pool_name: "Wallet A Pool",
+          amount: "500",
+          token: "USDC",
+        },
+        status: "failed",
+        error_code: "WALLET_REJECTED",
+        retry_count: 0,
+        created_at: "2026-09-24T12:00:00.000Z",
+      };
+      const pending = deferred();
+      let waiting = false;
+      let activeWallet = WALLET;
+      let authCalls = 0;
+      const pause = async () => {
+        waiting = true;
+        await pending.promise;
+      };
+      const fetchImpl = vi.fn(async (url, init = {}) => {
+        const request = new URL(url);
+        let data;
+        if (init.method === "POST") {
+          if (boundary === "creation") await pause();
+          data = {
+            ...original,
+            id: "act-retry",
+            status: "pending",
+            error_code: null,
+            action_payload: JSON.parse(init.body).action_payload,
+          };
+        } else if (request.pathname === "/actions/act-001") {
+          if (boundary === "preflight") await pause();
+          data = original;
+        } else {
+          data = request.searchParams.get("wallet") === WALLET
+            ? [original]
+            : [{
+                ...original,
+                id: "act-b",
+                wallet_address: WALLET_B,
+                action_payload: { ...original.action_payload, pool_name: "Wallet B Pool" },
+              }];
+        }
+        return new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+      const client = createRetryQueueClient({
+        baseUrl: "http://ledger.test",
+        fetchImpl,
+        getAuthHeaders: async () => {
+          // The list and authoritative read authenticate before the retry POST.
+          if (++authCalls === 3 && boundary === "authentication") await pause();
+          return { "X-Wallet-Address": activeWallet };
+        },
+      });
+      const requestSign = vi.fn().mockResolvedValue("explicit-user-signature");
+      const { rerender } = render(
+        <VaultRetryQueue walletAddress={WALLET} client={client} requestSign={requestSign} />,
+      );
+      fireEvent.click(await screen.findByRole("button", { name: "Retry deposit" }));
+      try {
+        await waitFor(() => expect(waiting).toBe(true));
+        activeWallet = WALLET_B;
+        rerender(
+          <VaultRetryQueue walletAddress={WALLET_B} client={client} requestSign={requestSign} />,
+        );
+        await screen.findByText(/Wallet B Pool/);
+        activeWallet = WALLET;
+        rerender(
+          <VaultRetryQueue walletAddress={WALLET} client={client} requestSign={requestSign} />,
+        );
+        await screen.findByText(/Wallet A Pool/);
+      } finally {
+        await act(async () => pending.resolve());
+      }
+
+      // A POST already sent cannot be recalled, but its late response must not sign.
+      const writes = fetchImpl.mock.calls.filter(([, init]) => init.method === "POST");
+      expect(writes).toHaveLength(boundary === "creation" ? 1 : 0);
+      expect(requestSign).not.toHaveBeenCalled();
+      expect(screen.getByText(/Wallet A Pool/)).toBeInTheDocument();
+      expect(document.querySelector('[data-action-id="act-retry"]')).toBeNull();
+    },
+  );
+
   it.each([
     ["wallet", false],
     ["client", false],

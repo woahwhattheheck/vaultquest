@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import {
   AlertCircle,
   RefreshCw,
@@ -202,6 +202,15 @@ export default function VaultRetryQueue({
   const [queueState, setQueueState] = useState(() => createQueueState(context));
   const [collapsed, setCollapsed] = useState(false);
   const reloadSequence = useRef({ value: 0 });
+  const retryEpoch = useRef(null);
+  useLayoutEffect(() => {
+    // A return to the same wallet starts a new epoch; retired retries stay retired.
+    const epoch = { context };
+    retryEpoch.current = epoch;
+    return () => {
+      if (retryEpoch.current === epoch) retryEpoch.current = null;
+    };
+  }, [context]);
   // A new wallet/client must not render the preceding context's rows, even
   // before its passive effect starts the next request.
   const { actions, loading, loadError, busyId, actionError } =
@@ -260,7 +269,10 @@ export default function VaultRetryQueue({
 
   const handleRetry = useCallback(
     async (action) => {
-      if (!walletAddress) return;
+      const epoch = retryEpoch.current;
+      const isCurrentContext = () =>
+        epoch !== null && retryEpoch.current === epoch && epoch.context === context;
+      if (!walletAddress || !isCurrentContext()) return;
       if (context.inFlightIds.has(action.id)) {
         updateQueue({
           actionError: "Retry already in progress (duplicate click ignored).",
@@ -279,6 +291,7 @@ export default function VaultRetryQueue({
             throw new Error("Could not read the current action; retry was not sent.");
           }
         }
+        if (!isCurrentContext()) return;
 
         if (fresh.status === "confirmed") {
           updateQueue({
@@ -295,6 +308,7 @@ export default function VaultRetryQueue({
           walletAddress,
           freshAction: fresh,
           requestSign,
+          isCurrentContext,
         });
 
         context.dismissedIds.add(action.id);
