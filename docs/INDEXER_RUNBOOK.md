@@ -69,9 +69,17 @@ startup and live RPC execution were not run.
 
 ## 1. System Overview
 
-The Event Indexer is a background service that polls the Stellar/Soroban ledger for contract events emitted by VaultQuest pool contracts. These events are parsed and dispatched to the VaultQuest backend via the protected internal reconciliation endpoint (`POST /internal/reconcile`), which resolves transaction statuses in the database.
+The backend constructs a `StellarIndexer` worker after configuration validation.
+The current `SorobanRpcEventSource.fetchEvents` implementation returns an empty
+array: live Soroban event retrieval is still a placeholder. A valid configuration,
+a running cron job or the `configured` health field does not establish that live
+events are being ingested.
 
-To keep track of sync progress and diagnose processing delays, the indexer periodically reports its checkpoint to:
+When supplied with an event source, the in-process worker reconciles decoded
+events directly through `LedgerService`. It saves both the last event ID and its
+ledger number through that service. External indexers can use the protected
+`POST /internal/reconcile` endpoint and report their checkpoint through:
+
 * **Endpoint:** `POST /internal/checkpoint`
 * **Authorization:** `X-Internal-Secret` header containing the backend's configured `INTERNAL_SERVICE_SECRET`.
 
@@ -136,7 +144,7 @@ Example Degraded Output:
 * **Resolution:**
   1. Note the ledger number (`latest_ledger`) where the indexer is stuck.
   2. Inspect the indexer container logs for parsing errors.
-  3. If safe, perform a manual skip or rewind by updating the checkpoint sequence (see Manual Ledger Rewind below).
+  3. Review the checkpoint recovery limits below before planning a replay. Changing `latest_ledger` alone does not reset the event cursor.
 
 #### 3. Database Connection Pool Exhaustion
 * **Diagnosis:** Indexer logs show `PrismaClientInitializationError: Can't reach database`.
@@ -155,19 +163,34 @@ Connect to the database via `psql` or Prisma Studio and query the database direc
 SELECT * FROM indexer_checkpoints WHERE id = 'singleton';
 ```
 
-### Manual Ledger Rewind / Reset
-If the indexer needs to re-process transactions from a past block due to missing/dropped events or database state sync issues:
+### Replay and checkpoint recovery limits
 
-1. Pause the event indexer service process.
-2. Update the `latest_ledger` to the desired past block sequence:
-   ```sql
-   UPDATE indexer_checkpoints
-   SET latest_ledger = 1490000, 
-       last_error = NULL, 
-       last_success_sync_time = NOW()
-   WHERE id = 'singleton';
-   ```
-3. Restart the event indexer service. It will resume processing events starting from ledger `1490001`.
+The worker resumes from `last_processed_event_id`, which it passes to the event
+source as its cursor. `latest_ledger` records the corresponding ledger number;
+changing that number alone does not rewind the cursor or select the next ledger.
+There is no supported ledger-only rewind command in this package.
+
+Checkpoint reads prefer Redis `indexer:checkpoint` when available and fall back
+to the PostgreSQL `singleton` row. The backend also flushes a dirty cached
+checkpoint to PostgreSQL every 15 seconds. A database-only edit can therefore be
+ignored at restart or overwritten by the cached checkpoint.
+
+Before planning a deployment-specific replay, stop every backend/indexer instance
+and any external checkpoint writer, and preserve both the database row and the
+cached checkpoint, including their event IDs and timestamps. A replay procedure
+must define a valid cursor for the deployed event source and reconcile both
+checkpoint stores before writers restart. The current placeholder event source
+does not retrieve historical events, so editing its checkpoint cannot restore
+missing events. This runbook does not supply an unimplemented reset operation.
+
+Keep `last_success_sync_time` tied to actual successful processing. Setting it to
+`NOW()` during a manual checkpoint edit would report fresh success without a
+successful sync. Confirm recovery using observed event processing and resulting
+ledger records, rather than a changed timestamp alone.
+
+Source references: [worker cursor and event source](../backend/src/services/stellarIndexer.ts),
+[checkpoint read/write behavior](../backend/src/services/cacheService.ts), and
+[backend checkpoint flush](../backend/src/server.ts).
 
 ---
 
