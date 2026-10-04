@@ -1,19 +1,14 @@
-name: Ledger cancellation PostgreSQL regression
+name: Publish retained cancellation source
 on:
   push:
     branches: [validation/ledger-cancel-20261004]
 permissions:
   contents: write
-concurrency:
-  group: ledger-cancel-20261004
-  cancel-in-progress: false
+  actions: read
 jobs:
-  cancellation:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    env:
-      CI: 'true'
-      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/vaultquest_test
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,59 +19,20 @@ jobs:
           ref: 093bec9f6e09e4d40e0a55035d2941b5fe42edee
           path: subject
           fetch-depth: 1
-      - uses: actions/setup-node@v4
+      - uses: actions/download-artifact@v4
         with:
-          node-version: '22.16.0'
-      - name: Prepare exact source and existing schema repair
+          name: ledger-cancel-postgresql-20261004
+          run-id: 37191663604
+          github-token: ${{ github.token }}
+          path: retained
+      - name: Publish exact retained source, without rerunning tests
         working-directory: subject
         run: |
-          git fetch --depth=1 origin dd369b16f589599c29cf21aacf49db441b1394f0
-          python ../controller/repair-scheduler.py
-          python ../controller/prepare.py prepare
-      - name: Install the retained lock's test runtime
-        working-directory: subject/backend
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          node node_modules/prisma/build/index.js generate
-      - name: One focused before and after experiment
-        working-directory: subject
-        run: |
-          mkdir -p ../evidence
-          set +e
-          (cd backend && node node_modules/vitest/vitest.mjs run tests/ledger.spec.ts -t 'LedgerService.cancelAction' --maxWorkers=1 --minWorkers=1 --reporter=json --outputFile=../../evidence/before.json) > ../evidence/before.log 2>&1
-          before=$?
-          set -e
-          echo "$before" > ../evidence/before.exit
-          python ../controller/prepare.py patch
-          set +e
-          (cd backend && node node_modules/vitest/vitest.mjs run tests/ledger.spec.ts -t 'LedgerService.cancelAction' --maxWorkers=1 --minWorkers=1 --reporter=json --outputFile=../../evidence/after.json) > ../evidence/after.log 2>&1
-          after=$?
-          set -e
-          echo "$after" > ../evidence/after.exit
-          python ../controller/prepare.py finish
-      - name: Retain code-only candidate without changing the original PR
-        working-directory: subject
-        run: |
+          python ../controller/publish-retained.py
           git config user.name woahwhattheheck
           git config user.email brycembusiness2@gmail.com
           git add backend/src/services/ledger.ts backend/tests/ledger.spec.ts backend/prisma/schema.prisma docs/LEDGER_CANCELLATION.md
           git commit -m 'fix(ledger): make cancellation conditional on pending state [skip ci]'
-          git rev-parse HEAD > ../evidence/candidate.sha
-          git rev-parse HEAD^{tree} > ../evidence/candidate.tree
-          git diff HEAD^ HEAD -- > ../evidence/candidate.patch
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
           git push origin HEAD:refs/heads/validation/ledger-cancel-candidate-20261004
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ledger-cancel-postgresql-20261004
-          path: |
-            evidence/
-            subject/docs/LEDGER_CANCELLATION.md
-            subject/backend/src/services/ledger.ts
-            subject/backend/tests/ledger.spec.ts
-            subject/backend/prisma/schema.prisma
-            subject/lib/retry-queue-client.js
-            subject/lib/retry-queue-policy.js
-            subject/lib/retry-queue-client.test.js
-            subject/components/app/VaultRetryQueue.jsx
-          retention-days: 7
