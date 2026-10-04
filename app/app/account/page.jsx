@@ -156,6 +156,7 @@ const SUPPORTED_CHAIN_IDS = SUPPORTED_CHAINS.map((chain) => chain.id);
 export default function AccountPage() {
   const { isConnected: wagmiConnected, chainId } = useAccount();
   const { openConnectModal } = useConnectModal();
+  const [hasConnected, setHasConnected] = useState(wagmiConnected);
   const [fixtures, setFixtures] = useState({
     mockConnected: false,
     networkMismatch: false,
@@ -170,17 +171,23 @@ export default function AccountPage() {
     setFixtures(parseAccountTestFixtures(window.location.search));
   }, []);
 
+  // Remember real connections observed during this page lifetime, not fixtures.
+  useEffect(() => {
+    if (wagmiConnected) setHasConnected(true);
+  }, [wagmiConnected]);
+
   const walletState = useMemo(() => {
     const effectiveFixtures = dismissedFixtureMismatch
       ? { ...fixtures, networkMismatch: false }
       : fixtures;
     return resolveAccountWalletState({
       wagmiConnected,
+      hasConnected,
       chainId,
       supportedChainIds: SUPPORTED_CHAIN_IDS,
       fixtures: effectiveFixtures,
     });
-  }, [wagmiConnected, chainId, fixtures, dismissedFixtureMismatch]);
+  }, [wagmiConnected, hasConnected, chainId, fixtures, dismissedFixtureMismatch]);
 
   const handleRetry = () => {
     setDismissedFixtureMismatch(true);

@@ -68,9 +68,10 @@ describe("AccountPage", () => {
     mockWagmi.useChainId.mockReturnValue(43113);
   });
 
-  it("renders the disconnected empty state from wallet providers", async () => {
+  it("renders the never-connected empty state without disconnect recovery", async () => {
     render(<AccountPage />);
     expect(await screen.findByText(/Wallet not connected/i)).toBeInTheDocument();
+    expect(screen.queryByText("disconnect-guidance")).not.toBeInTheDocument();
   });
 
   it("renders the connected dashboard from wagmi without URL fixtures", async () => {
@@ -116,7 +117,7 @@ describe("AccountPage", () => {
           expect(screen.queryByText("disconnect-guidance")).not.toBeInTheDocument();
         } else {
           expect(screen.queryByText("mismatch-guidance")).not.toBeInTheDocument();
-          expect(screen.getByText("disconnect-guidance")).toBeInTheDocument();
+          expect(screen.queryByText("disconnect-guidance")).not.toBeInTheDocument();
         }
       } finally {
         vi.unstubAllEnvs();
@@ -171,6 +172,7 @@ describe("AccountPage", () => {
       </WagmiProvider>,
     );
     expect(await screen.findByText(/Wallet not connected/i)).toBeInTheDocument();
+    expect(screen.queryByText("disconnect-guidance")).not.toBeInTheDocument();
 
     await act(() => connect(config, { connector }));
     expect(await screen.findByText("position-summary")).toBeInTheDocument();
@@ -193,6 +195,7 @@ describe("AccountPage", () => {
 
     await act(() => disconnect(config, { connector }));
     expect(await screen.findByText(/Wallet not connected/i)).toBeInTheDocument();
+    expect(await screen.findByText("disconnect-guidance")).toBeInTheDocument();
     expect(screen.queryByText("mismatch-guidance")).not.toBeInTheDocument();
     expect(screen.queryByText("position-summary")).not.toBeInTheDocument();
   });
