@@ -31,6 +31,7 @@ jobs:
         working-directory: subject
         run: |
           git fetch --depth=1 origin dd369b16f589599c29cf21aacf49db441b1394f0
+          python ../controller/repair-scheduler.py
           python ../controller/prepare.py prepare
       - name: Install the retained lock's test runtime
         working-directory: subject/backend
@@ -74,4 +75,8 @@ jobs:
             subject/backend/src/services/ledger.ts
             subject/backend/tests/ledger.spec.ts
             subject/backend/prisma/schema.prisma
+            subject/lib/retry-queue-client.js
+            subject/lib/retry-queue-policy.js
+            subject/lib/retry-queue-client.test.js
+            subject/components/app/VaultRetryQueue.jsx
           retention-days: 7
