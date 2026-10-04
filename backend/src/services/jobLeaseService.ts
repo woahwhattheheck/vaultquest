@@ -86,6 +86,7 @@ export class JobLeaseService {
     { fenceToken: bigint; heartbeat: NodeJS.Timeout; abort: AbortController }
   >();
   private readonly acquiring = new Set<string>();
+  private readonly drainWaiters = new Set<() => void>();
   private shuttingDown = false;
 
   constructor(opts: JobLeaseServiceOptions) {
@@ -120,8 +121,17 @@ export class JobLeaseService {
     let acquisition: LeaseAcquisition;
     try {
       acquisition = await this.store.tryAcquire(jobName, this.ownerId, this.ttlMs, this.now());
+      if (this.shuttingDown && acquisition.acquired) {
+        try {
+          await this.store.release(jobName, this.ownerId, acquisition.fenceToken);
+        } catch (err) {
+          this.logger.warn({ err, jobName }, "job lease release after shutdown failed");
+        }
+        return { status: "skipped", reason: "shutting_down" };
+      }
     } finally {
       this.acquiring.delete(jobName);
+      this.notifyDrainWaiters();
     }
     if (!acquisition.acquired) {
       this.logger.info(
@@ -129,17 +139,6 @@ export class JobLeaseService {
         "job lease skipped: not acquired"
       );
       return { status: "skipped", reason: acquisition.reason };
-    }
-
-    // Shutdown may complete while the store call is pending. Release a late
-    // acquisition without starting any work or heartbeat.
-    if (this.shuttingDown) {
-      try {
-        await this.store.release(jobName, this.ownerId, acquisition.fenceToken);
-      } catch (err) {
-        this.logger.warn({ err, jobName }, "job lease release after shutdown failed");
-      }
-      return { status: "skipped", reason: "shutting_down" };
     }
 
     const abort = new AbortController();
@@ -197,29 +196,32 @@ export class JobLeaseService {
       throw error;
     } finally {
       clearInterval(heartbeat);
-      this.active.delete(jobName);
       try {
         await this.store.release(jobName, this.ownerId, acquisition.fenceToken);
       } catch (err) {
         this.logger.warn({ err, jobName }, "job lease release failed");
+      } finally {
+        this.active.delete(jobName);
+        this.notifyDrainWaiters();
       }
     }
   }
 
-  /** Release all held leases (graceful shutdown). */
+  /** Stop new lease runs and let every in-flight acquisition/run drain. */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    const entries = [...this.active.entries()];
-    for (const [jobName, state] of entries) {
-      state.abort.abort();
-      clearInterval(state.heartbeat);
-      this.active.delete(jobName);
-      try {
-        await this.store.release(jobName, this.ownerId, state.fenceToken);
-      } catch (err) {
-        this.logger.warn({ err, jobName }, "job lease release on shutdown failed");
-      }
+    while (this.acquiring.size > 0 || this.active.size > 0) {
+      await new Promise<void>((resolve) => {
+        this.drainWaiters.add(resolve);
+      });
     }
+  }
+
+  private notifyDrainWaiters(): void {
+    if (this.drainWaiters.size === 0) return;
+    const waiters = [...this.drainWaiters];
+    this.drainWaiters.clear();
+    for (const resolve of waiters) resolve();
   }
 
   private async heartbeat(jobName: string, fenceToken: bigint, abort: AbortController): Promise<void> {
