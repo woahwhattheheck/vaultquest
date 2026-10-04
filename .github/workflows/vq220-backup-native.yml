@@ -1,0 +1,121 @@
+name: VQ220 backup and job lease native acceptance
+on:
+  push:
+    branches: [validation/vq220-backup-native-abaa-20261004]
+    paths: [.github/workflows/vq220-backup-native.yml]
+permissions:
+  contents: read
+concurrency:
+  group: vq220-backup-native-abaa
+  cancel-in-progress: false
+jobs:
+  backup-and-leases:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: subject/backend
+    steps:
+      - name: Check out validation controller
+        uses: actions/checkout@v6
+        with:
+          path: controller
+          persist-credentials: false
+      - name: Check out immutable product
+        uses: actions/checkout@v6
+        with:
+          ref: abaa21ef82fbe869f552240036568cce69488ccd
+          path: subject
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Verify immutable source and reconciled lock
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = abaa21ef82fbe869f552240036568cce69488ccd
+          test "$(git hash-object package.json)" = ec316da5ad88c82bd65e7462917b3267378a17f1
+          test "$(git hash-object package-lock.json)" = ab5a94d637034000d67536be5e26a5eb1d6095af
+          test "$(git hash-object src/services/backupService.ts)" = f6c995b9a9df63165fc30dd0bb24a07740f77e0c
+          test "$(git hash-object src/services/jobLeaseService.ts)" = 78912070e2153cbcec5737d6d98cc9183e00693d
+          test "$(git hash-object tests/backup.spec.ts)" = 348c48ed3a22a6191733180938b68334b8515ebe
+          test "$(git hash-object tests/jobLease.postgres.spec.ts)" = 44a44e70df6d88df739b00aa242c4205d746c6d2
+          cp package-lock.json "$RUNNER_TEMP/vq220-original-lock.json"
+          cp ../../controller/backend/package-lock.json package-lock.json
+          test "$(git hash-object package-lock.json)" = cd026cdeab756ec0c0814327d92b7b03c3b190b4
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const before = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/vq220-original-lock.json'));
+          const after = JSON.parse(fs.readFileSync('package-lock.json'));
+          const manifest = JSON.parse(fs.readFileSync('package.json'));
+          const changed = Object.entries(before.packages).filter(([n, v]) => n && (!after.packages[n] || after.packages[n].version !== v.version || after.packages[n].integrity !== v.integrity)).map(([n, v]) => ({name:n, before:v.version, after:after.packages[n]?.version}));
+          assert.deepEqual(changed, [{ name:'node_modules/vite', before:'5.4.21', after:'5.4.11' }]);
+          assert.deepEqual(after.packages[''].dependencies, manifest.dependencies);
+          assert.deepEqual(after.packages[''].devDependencies, manifest.devDependencies);
+          assert.equal(after.packages['node_modules/vite'].version, manifest.devDependencies.vite);
+          assert.equal(after.packages['node_modules/vitest'].version, manifest.devDependencies.vitest);
+          console.log('EXISTING_PIN_CHANGES', JSON.stringify(changed));
+          console.log('ADDED_LOCKED_PACKAGES', JSON.stringify(Object.entries(after.packages).filter(([n]) => !(n in before.packages)).map(([n,v]) => ({name:n, version:v.version}))));
+          JS
+          node --version
+          npm --version
+          docker --version
+          /usr/lib/postgresql/16/bin/pg_dump --version
+          /usr/lib/postgresql/16/bin/pg_restore --version
+      - name: Install exact reviewed backend dependency lock
+        run: |
+          npm ci --no-audit --no-fund
+          npm ls vite vitest axios form-data hasown --all
+          ./node_modules/.bin/prisma generate
+      - name: Run unchanged maintained selection with real PostgreSQL Testcontainers
+        run: |
+          set -euo pipefail
+          unset VAULTQUEST_TEST_DATABASE_URL VAULTQUEST_TEST_SINGLE_SESSION
+          native_status=0
+          node node_modules/vitest/vitest.mjs run tests/jobLease.spec.ts tests/jobLease.postgres.spec.ts tests/backup.spec.ts tests/retry.spec.ts --maxWorkers=1 --minWorkers=1 --reporter=json --outputFile=maintained-native-results.json || native_status=$?
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const r = JSON.parse(fs.readFileSync('maintained-native-results.json'));
+          console.log(JSON.stringify(r, null, 2));
+          assert.equal(r.numTotalTests, 59);
+          assert.equal(r.numPassedTests, 59);
+          assert.equal(r.numFailedTests, 0);
+          assert.equal(r.numPendingTests, 0);
+          assert.equal(r.numTodoTests, 0);
+          console.log('VQ220_MAINTAINED_RESULT: 59 passed, zero failed/skipped/todo; backup25 (external-I/O mocks plus native child cancellation), jobLease13, retry13, PostgreSQL fencing8 including separate-connection contention');
+          JS
+          exit "$native_status"
+      - name: Start disposable localhost PostgreSQL16 for real CLI backup and restore
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name "vq220-native-$GITHUB_RUN_ID" --network host -e POSTGRES_PASSWORD=vq220_fixture_only postgres:16-alpine postgres -p 55432 -c "listen_addresses=*"
+          ready=0
+          for attempt in $(seq 1 40); do
+            if docker exec "vq220-native-$GITHUB_RUN_ID" pg_isready -h 127.0.0.1 -p 55432 -U postgres; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
+          docker exec "vq220-native-$GITHUB_RUN_ID" postgres --version
+          docker inspect --format '{{.Image}}' "vq220-native-$GITHUB_RUN_ID"
+      - name: Run real backup and restore for encoded names and IPv6
+        run: |
+          set -euo pipefail
+          cp ../../controller/validation/vq220-native-backup.mts .vq220-native-backup.mts
+          ./node_modules/.bin/tsx .vq220-native-backup.mts
+      - name: Remove disposable native container
+        if: always()
+        run: |
+          if docker container inspect "vq220-native-$GITHUB_RUN_ID" > /dev/null 2>&1; then
+            docker rm -f "vq220-native-$GITHUB_RUN_ID"
+          fi
+      - name: Record final unchanged product inputs and dependency versions
+        if: always()
+        run: |
+          git diff --stat
+          test "$(git diff --name-only)" = backend/package-lock.json
+          git hash-object package.json package-lock.json src/services/backupService.ts src/services/jobLeaseService.ts tests/backup.spec.ts tests/jobLease.spec.ts tests/jobLease.postgres.spec.ts tests/retry.spec.ts
+          if [ -d node_modules ]; then npm ls @prisma/client prisma vite vitest @testcontainers/postgresql --depth=0; fi
