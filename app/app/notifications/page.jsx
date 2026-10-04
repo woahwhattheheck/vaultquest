@@ -7,19 +7,10 @@ import Link from "next/link";
 import { Bell, Check, CheckCircle2, Clock, Inbox, MailOpen } from "lucide-react";
 
 
-function formatDateLabel(dateValue) {
-  return new Date(dateValue).toLocaleDateString("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function formatTime(dateValue) {
-  return new Date(dateValue).toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+function formatNotificationDate(dateValue, formatter) {
+  const date = new Date(dateValue);
+  // Intl.format throws for invalid dates; keep the previous display behavior.
+  return Number.isNaN(date.getTime()) ? "Invalid Date" : formatter.format(date);
 }
 
 export default function VaultNotificationsPage() {
@@ -82,13 +73,25 @@ export default function VaultNotificationsPage() {
   }, [notifications, showUnreadOnly]);
 
   const groupedNotifications = useMemo(() => {
+    if (visibleNotifications.length === 0) return {};
+    const dateFormatter = new Intl.DateTimeFormat("en-US", {
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
     return visibleNotifications.reduce((groups, notification) => {
-      const label = formatDateLabel(notification.date);
+      const label = formatNotificationDate(notification.date, dateFormatter);
       if (!groups[label]) groups[label] = [];
       groups[label].push(notification);
       return groups;
     }, {});
   }, [visibleNotifications]);
+
+  // Share a formatter for this render, not across wallets or time-zone changes.
+  const timeFormatter = visibleNotifications.length === 0 ? null : new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 
   const unreadCount = notifications.filter((notification) => notification.status === "unread").length;
 
@@ -197,7 +200,7 @@ export default function VaultNotificationsPage() {
                               <span aria-hidden="true">·</span>
                               <span className="inline-flex items-center gap-1">
                                 <Clock className="h-3.5 w-3.5" aria-hidden="true" />
-                                {formatTime(notification.date)}
+                                {formatNotificationDate(notification.date, timeFormatter)}
                               </span>
                             </div>
                           </div>
