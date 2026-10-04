@@ -1,0 +1,88 @@
+name: VQ214 canonical pnpm acceptance
+
+on:
+  push:
+    branches: [validation/vq214-canonical-pnpm-ledger0938]
+
+permissions:
+  contents: read
+
+jobs:
+  canonical:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - name: Generate the candidate with the canonical package manager
+        timeout-minutes: 5
+        run: |
+          mkdir -p evidence/postimages
+          pnpm --version | tee evidence/pnpm-version.txt
+          node --version | tee evidence/node-version.txt
+          git rev-parse HEAD | tee evidence/validation-head.txt
+          printf '%s\n' 13992798d927883579f8c4c4505069b4f34b249b > evidence/product-base.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('pnpm-workspace.yaml')
+          s = p.read_text()
+          changes = {
+              "  vite@<=6.4.1: '>=6.4.2'": "  vite@<=6.4.1: '~6.4.3'",
+              "  vite@<=6.4.2: '>=6.4.3'": "  vite@<=6.4.2: '~6.4.3'",
+              "  vitest@<3.2.6: '>=3.2.6'": "  vitest@<3.2.6: '~3.2.6'",
+          }
+          for before, after in changes.items():
+              assert s.count(before) == 1, before
+              s = s.replace(before, after)
+          p.write_text(s)
+          PY
+          pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts --reporter=append-only 2>&1 | tee evidence/lock-generation.log
+          cp pnpm-workspace.yaml pnpm-lock.yaml evidence/postimages/
+          git diff --stat > evidence/diff-stat.txt
+          git diff -- pnpm-workspace.yaml pnpm-lock.yaml > evidence/source.patch
+          git diff --name-only > evidence/changed-files.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          paths = set(Path('evidence/changed-files.txt').read_text().splitlines())
+          assert paths <= {'pnpm-workspace.yaml', 'pnpm-lock.yaml'}, paths
+          PY
+          sha256sum pnpm-workspace.yaml pnpm-lock.yaml > evidence/candidate-before-install.sha256
+      - name: Install the complete workspace from the generated frozen lock
+        timeout-minutes: 5
+        run: |
+          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | tee evidence/frozen-install.log
+          sha256sum -c evidence/candidate-before-install.sha256
+          node - <<'JS' | tee evidence/runner-versions.json
+          const { createRequire } = require('node:module');
+          const vitestPath = require.resolve('vitest/package.json');
+          const local = createRequire(vitestPath);
+          console.log(JSON.stringify({
+            node: process.version,
+            vitest: require(vitestPath).version,
+            vite: local('vite/package.json').version,
+            jsdom: require('jsdom/package.json').version
+          }, null, 2));
+          JS
+      - name: Run the existing focused fee command
+        timeout-minutes: 3
+        run: |
+          pnpm exec vitest run lib/chain-fee-adapters.test.js components/app/GasPrioritySelector.test.jsx lib/chain-fee-observation.test.jsx 2>&1 | tee evidence/fee-tests.log
+          sha256sum -c evidence/candidate-before-install.sha256
+          git diff --name-only > evidence/final-changed-files.txt
+      - name: Retain generated source and actual execution output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vq214-canonical-pnpm
+          path: evidence/
+          retention-days: 7
