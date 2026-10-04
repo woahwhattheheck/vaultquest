@@ -171,7 +171,7 @@ describe("SupportWidget durable retries", () => {
     expect((await persisted()).map((row) => row.description)).toEqual([DESCRIPTION]);
   });
 
-  it("preserves a changed wallet draft when the intake returns a matching older ticket", async () => {
+  it("preserves a changed wallet draft until its own ticket is accepted", async () => {
     const walletA = "G".padEnd(56, "A");
     const walletB = "G".padEnd(56, "B");
     connectedPublicKey.set(walletA);
@@ -190,13 +190,13 @@ describe("SupportWidget durable retries", () => {
     expect(screen.getByDisplayValue(DESCRIPTION)).toBeInTheDocument();
     submit();
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("A matching ticket was already received."));
+    await screen.findByText("Ticket Submitted!");
     expect(requests[1].wallet_address).toBe(walletB);
     expect(requests[1].idempotency_key).not.toBe(requests[0].idempotency_key);
     const rows = await persisted();
-    expect(rows).toHaveLength(1);
-    expect(rows[0].wallet_address).toBe(walletA);
-    expect(screen.getByDisplayValue(DESCRIPTION)).toBeInTheDocument();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.wallet_address)).toEqual([walletA, walletB]);
+    expect(screen.queryByDisplayValue(DESCRIPTION)).not.toBeInTheDocument();
   });
 
   it("rejects malformed acceptance receipts and safely retries the unchanged draft", async () => {
