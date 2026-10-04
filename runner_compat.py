@@ -10,9 +10,11 @@ runtime.mkdir(exist_ok=True)
 subprocess.run(['npm', 'install', '--prefix', str(runtime), '--ignore-scripts', '--no-audit', '--no-fund'], check=True)
 for name in ('vitest', 'vite'):
     dest = root / 'node_modules' / name
-    if not dest.is_symlink():
-        raise RuntimeError('expected pnpm-generated symlink: ' + str(dest))
-    dest.unlink()
+    if dest.is_symlink():
+        dest.unlink()
+    elif dest.exists():
+        raise RuntimeError('refusing to replace an unexpected real dependency directory: ' + str(dest))
+    # Vite can be transitive-only and therefore absent from the root namespace.
     dest.symlink_to(runtime / 'node_modules' / name, target_is_directory=True)
 launcher = root / 'node_modules' / '.bin' / 'vitest'
 launcher.write_text('#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/../vitest/vitest.mjs" "$@"\n')
