@@ -39,7 +39,7 @@ The Event Indexer is a background service that polls the Stellar/Soroban ledger 
 
 To keep track of sync progress and diagnose processing delays, the indexer periodically reports its checkpoint to:
 * **Endpoint:** `POST /internal/checkpoint`
-* **Authorization:** Secure service-to-service header token (`X-Service-Auth`).
+* **Authorization:** `X-Internal-Secret` header containing the backend's configured `INTERNAL_SERVICE_SECRET`.
 
 The backend stores this in the `indexer_checkpoints` database table. A public health interface is available at `GET /health/indexer` to calculate sync lag dynamically.
 
@@ -140,4 +140,18 @@ If the indexer needs to re-process transactions from a past block due to missing
 ## 5. Security & Access Control
 
 * The `/internal/checkpoint` and `/internal/reconcile` routes MUST always be guarded by a secure service auth key.
-* Ensure that the `X-Service-Auth` token configured in the indexer matches `INTERNAL_SECRET` in the backend environment. Never expose this key in client-side bundles.
+* Configure `INTERNAL_SERVICE_SECRET` in the backend environment before starting
+  the server. Normal environment validation requires at least 20 characters and
+  rejects placeholder values. Replace the checked-in example with a secret
+  supplied by your deployment's secret configuration.
+* For internal HTTP calls to either route, send that same value in the
+  `X-Internal-Secret` header. The shared guard rejects requests without a matching
+  secret. Never expose this key in client-side bundles.
+* When rotating the secret, restart the backend with the updated configuration
+  and update internal HTTP callers to use the same value. The server passes the
+  configured value into the route guards when it builds the application.
+
+The [environment schema](../backend/src/env.ts),
+[server startup](../backend/src/server.ts), and
+[shared header verifier](../backend/src/middleware/internal-secret.ts) define
+these configuration and header names.
