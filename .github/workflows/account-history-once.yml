@@ -1,0 +1,85 @@
+name: Account history integration
+on:
+  push:
+    branches: [validation/account-connection-history-20261004]
+    paths: [.github/workflows/account-history-once.yml]
+permissions:
+  contents: write
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2748532f7d485d1a0234532f842df076632c2721
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+      - name: Apply exact recovered patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object lib/account-wallet-state.js)" = b9ebabb8f2179af88c9588dc9bf2e5d4df0df91f
+          test "$(git hash-object app/app/account/page.test.jsx)" = c2472f12d1c90b4b9294bb9092da3b6591e9c742
+          gh api "repos/$GITHUB_REPOSITORY/git/blobs/989afc9b3e3518e1f9d5525ff1313034f650ac22" --jq .content | base64 --decode > /tmp/account-history.patch
+          test "$(git hash-object /tmp/account-history.patch)" = 989afc9b3e3518e1f9d5525ff1313034f650ac22
+          git apply --check /tmp/account-history.patch
+          git apply /tmp/account-history.patch
+          git diff --check
+          git diff --stat
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          expected = ['app/app/account/page.jsx', 'app/app/account/page.test.jsx', 'lib/account-wallet-state.js', 'lib/account-wallet-state.test.js']
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          assert changed == expected, changed
+          records = []
+          for i, path in enumerate(expected):
+              source = Path(path).read_text()
+              payload = '/tmp/account-history-blob-' + str(i) + '.json'
+              Path(payload).write_text(json.dumps({'content': source, 'encoding': 'utf-8'}))
+              records.append({'path': path, 'payload': payload, 'sha': subprocess.check_output(['git','hash-object',path],text=True).strip()})
+          Path('/tmp/account-history-blobs.json').write_text(json.dumps(records))
+          print(json.dumps(records))
+          PY
+      - name: Install the frozen workspace dependencies
+        run: |
+          npm install --global pnpm@10.28.2
+          pnpm install --frozen-lockfile
+      - name: Run only changed connection-history and provider cases
+        run: |
+          pnpm exec vitest run lib/account-wallet-state.test.js app/app/account/page.test.jsx -t 'first connection|provider connection is lost|never-connected|keeps mismatch-only production|tracks supported'
+      - name: Preserve checked source blobs without moving a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          for entry in json.loads(Path('/tmp/account-history-blobs.json').read_text()):
+              current = subprocess.check_output(['git','hash-object',entry['path']],text=True).strip()
+              assert current == entry['sha'], entry['path']
+              result = json.loads(subprocess.check_output(['gh','api','--method','POST','repos/woahwhattheheck/vaultquest/git/blobs','--input',entry['payload']],text=True))
+              assert result['sha'] == current
+              print(json.dumps({'path': entry['path'], 'sha': result['sha']}))
+          PY
+      - name: Production build requested by issue 114
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          NODE_OPTIONS: --max-old-space-size=4096
+        shell: bash
+        run: |
+          set +e
+          pnpm run build > /tmp/account-history-build.log 2>&1
+          result=$?
+          tail -n 80 /tmp/account-history-build.log
+          printf '\nPRODUCTION_BUILD_EXIT=%s\n' "$result"
+          exit "$result"
