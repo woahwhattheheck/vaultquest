@@ -40,10 +40,10 @@ jobs:
           node --version | tee evidence/node-version.txt
           pnpm --version | tee evidence/pnpm-version.txt
           git rev-parse HEAD | tee evidence/controller-head.txt
-          git rev-parse HEAD^ | tee evidence/product-source.txt
-          test "$(git rev-parse HEAD^)" = "95d45964477969de5ce9d920d8a31694941359d6"
+          git rev-parse HEAD^2 | tee evidence/product-source.txt
+          test "$(git rev-parse HEAD^2)" = "d127ab5e5ba1c6ad40ff79e185c6e62e240e7425"
           test "$(git hash-object lib/customRpc.js)" = "97010788625d770be502bd40713677d0255fbe62"
-          test "$(git hash-object lib/customRpc.test.js)" = "388fd4302fb18250048118f43765ff57ea1be99f"
+          test "$(git hash-object lib/customRpc.test.js)" = "ec5eddbaa578d6526952748110c850d8b750290b"
           git diff --exit-code abc6d8a4aa13f00ca8333271faa824a3df86af36 -- package.json pnpm-lock.yaml pnpm-workspace.yaml backend/package.json stellar-wallet-connect/package.json
           sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml backend/package.json stellar-wallet-connect/package.json > evidence/dependencies-before.sha256
           git ls-files -s > evidence/tracked-inputs.txt
@@ -109,10 +109,10 @@ jobs:
             'observedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'runId':os.environ['GITHUB_RUN_ID'],
             'controller':os.environ['GITHUB_SHA'],
-            'productSource':'95d45964477969de5ce9d920d8a31694941359d6',
+            'productSource':'d127ab5e5ba1c6ad40ff79e185c6e62e240e7425',
             'baselineSource':'abc6d8a4aa13f00ca8333271faa824a3df86af36',
             'productionBlob':'97010788625d770be502bd40713677d0255fbe62',
-            'maintainedTestBlob':'388fd4302fb18250048118f43765ff57ea1be99f',
+            'maintainedTestBlob':'ec5eddbaa578d6526952748110c850d8b750290b',
             'before':summary(before),'after':summary(after),
             'runtime':json.loads(Path('evidence/runtime.json').read_text()),
             'scope':'Full existing customRpc test file with real installed dependencies and controlled HTTP replies; no live provider or transaction submission.',
