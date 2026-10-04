@@ -1,0 +1,65 @@
+--- a/backend/src/services/jobLeaseService.ts
++++ b/backend/src/services/jobLeaseService.ts
+@@ -168,8 +168,15 @@
+         return fn(tx);
+       })
+     };
++    // A fenced transaction may hold the lease row while renewal waits. Keep
++    // the existing cadence, but never queue another renewal for this run.
++    let renewalInFlight = false;
+     const heartbeat = setInterval(() => {
+-      void this.heartbeat(jobName, acquisition.fenceToken, abort);
++      if (renewalInFlight || abort.signal.aborted) return;
++      renewalInFlight = true;
++      void this.heartbeat(jobName, acquisition.fenceToken, abort).finally(() => {
++        renewalInFlight = false;
++      });
+     }, this.heartbeatMs);
+     // Allow process to exit even if a heartbeat timer is pending.
+     heartbeat.unref?.();
+--- a/backend/tests/jobLease.spec.ts
++++ b/backend/tests/jobLease.spec.ts
+@@ -213,6 +213,43 @@
+     expect(store.peek("cron:pending")?.ownerId).toBe("");
+   });
+ 
++  it("keeps only one pending heartbeat per run and resumes after renewal", async () => {
++    const store = new InMemoryJobLeaseStore();
++    const actualRenew = store.renew.bind(store);
++    let releaseRenewal!: () => void;
++    const renewalGate = new Promise<void>((resolve) => { releaseRenewal = resolve; });
++    const renew = vi.spyOn(store, "renew").mockImplementation(async (...args) => {
++      await renewalGate;
++      return actualRenew(...args);
++    });
++    const svc = new JobLeaseService({
++      logger, store, ownerId: "slow-store", ttlMs: 30_000, heartbeatMs: 10
++    });
++    let completeWork!: () => void;
++    const workGate = new Promise<void>((resolve) => { completeWork = resolve; });
++    const running = svc.runWithLease("cron:slow", async () => {
++      await workGate;
++      return "done";
++    });
++    try {
++      await vi.advanceTimersByTimeAsync(1_000);
++      expect(renew).toHaveBeenCalledTimes(1);
++      releaseRenewal();
++      await vi.advanceTimersByTimeAsync(0);
++      await vi.advanceTimersByTimeAsync(10);
++      expect(renew).toHaveBeenCalledTimes(2);
++      completeWork();
++      expect((await running).status).toBe("ran");
++      await vi.advanceTimersByTimeAsync(1_000);
++      expect(renew).toHaveBeenCalledTimes(2);
++    } finally {
++      releaseRenewal();
++      completeWork();
++      await running;
++      await svc.shutdown();
++    }
++  });
++
+   it("marks fence_lost when another owner steals after expiry mid-run", async () => {
+     const store = new InMemoryJobLeaseStore();
+     const clock = makeClock(Date.parse("2026-09-25T00:00:00.000Z"));

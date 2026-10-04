@@ -1,0 +1,60 @@
+name: Publish recovered heartbeat source
+on:
+  push:
+    branches: [source-publication/vq220-rivet76f4-20261004]
+permissions:
+  contents: write
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve exact code-only successor on a new branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, tempfile, urllib.request
+          repo = 'woahwhattheheck/vaultquest'
+          assert os.environ['GITHUB_REPOSITORY'] == repo
+          pin = '63afa4418edd7edeb19ca7564dc12940a00e2a45'
+          prefix = f'https://api.github.com/repos/{repo}/'
+          def api(path, body=None):
+              request = urllib.request.Request(prefix + path, data=None if body is None else json.dumps(body).encode(), headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'User-Agent': 'source-publication'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          def blob(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          identities = {
+              'backend/src/services/jobLeaseService.ts': ('f2ba19ee63e232fb21f0f4d822ffda95346f8993','78912070e2153cbcec5737d6d98cc9183e00693d'),
+              'backend/tests/jobLease.spec.ts': ('7cad73a31476daff9c52c4c1d453e07dfaac19f6','bf742ab48aa1d7f93be86652e2188be85e414218')
+          }
+          parent = api('git/commits/'+pin)
+          patch = pathlib.Path('delivery.patch').resolve()
+          with tempfile.TemporaryDirectory() as tmp:
+              root = pathlib.Path(tmp)
+              for name, (before, after) in identities.items():
+                  record = api('contents/'+name+'?ref='+pin)
+                  data = base64.b64decode(record['content'])
+                  assert record['sha'] == before == blob(data)
+                  target = root/name
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(data)
+              subprocess.run(['git','apply',str(patch)], cwd=root, check=True)
+              entries=[]
+              for name, (_, after) in identities.items():
+                  data=(root/name).read_bytes()
+                  assert blob(data)==after
+                  created=api('git/blobs', {'content':base64.b64encode(data).decode(),'encoding':'base64'})
+                  assert created['sha']==after
+                  entries.append({'path':name,'mode':'100644','type':'blob','sha':after})
+              tree=api('git/trees', {'base_tree':parent['tree']['sha'],'tree':entries})
+              message = 'fix(workers): avoid overlapping heartbeat renewals\n\nPreserve cron cadence, TTL, ownership fencing and cleanup while permitting only one pending renewal per run. Both source files preserve the current backup URL correction.\n\nFocused Node 22.16 execution of the complete production classes with controlled timers and a delayed renewal collaborator: 100 pending renewals per job before, one after; two jobs remain independent, renewal resumes after resolution, normal completion clears timers, and lost-fence, rejected-renewal and shutdown controls retain their results. No PostgreSQL or full-suite result is claimed. One corresponding regression was added to the maintained Vitest file; that Vitest selection was not rerun in this recovery. Source blobs: 78912070e2153cbcec5737d6d98cc9183e00693d and bf742ab48aa1d7f93be86652e2188be85e414218.'
+              commit=api('git/commits', {'message':message,'tree':tree['sha'],'parents':[pin]})
+              ref='refs/heads/rivet/vq220-heartbeat-20261004'
+              result=api('git/refs', {'ref':ref,'sha':commit['sha']})
+              print(json.dumps({'commit':commit['sha'],'tree':tree['sha'],'ref':result['ref'],'files':entries},indent=2))
+          PY
