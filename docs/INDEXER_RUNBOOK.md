@@ -33,6 +33,40 @@ probe. Whitespace around comma-separated contract IDs continues to be ignored.
 
 When the indexer is not configured, `configured` is `false` and `network` is `null`.
 
+
+### Canonical install and focused acceptance
+
+Use the integrity-pinned pnpm version in the root package manifest:
+
+```bash
+pnpm install --frozen-lockfile --reporter=append-only
+pnpm --dir backend exec vitest run tests/indexerConfig.spec.ts
+```
+
+The workspace and root lock now reuse the dependency repair from
+[PR214 source `08915ce6`](https://github.com/woahwhattheheck/vaultquest/commit/08915ce6cf89fcbc238319599d77ff41ff30bc7b).
+All three workspace manifests matched that source exactly. The lock includes the
+backend's already-declared SendGrid and Stellar SDK dependencies; compatible
+Vitest 3.2.x and Vite 6.4.x overrides replace the unbounded runner overrides.
+The scoped Solana WebSocket provider and all other overrides/build permissions
+are preserved from that repair. No indexer implementation or tests changed.
+
+On 2026-10-04, [native run 37200230710](https://github.com/woahwhattheheck/vaultquest/actions/runs/37200230710/job/111430233741)
+checked product `9c8a809f8b91ea66d1a3370cc562003bc036d9e8` on Ubuntu 24.04,
+Node 22.23.3 and pnpm 10.28.2. The normal frozen install completed across all
+three workspaces in 16.2 seconds. The unchanged indexer file passed **16/16**
+cases on Vitest 3.2.7 in 600 ms (16 ms in assertions). Dependency files remained
+unchanged by installation and execution.
+
+Raw install output and JSON results are in artifact `11302787703`,
+SHA-256 `6f815b995792bbf98dc9fb06049eb18f1bf2cc5b598a05852b0922b6da8e9a8c`.
+The first validation controller stopped before installation because it redundantly
+specified the package-manager version; the successful controller
+`5d42e1f6a3696a443f6d6d532b6a67b382a54e1d` uses the manifest's integrity-pinned version.
+Both controllers used the same product source. This result covers installation
+and configuration validation; full backend build, Prisma generation, database
+startup and live RPC execution were not run.
+
 ## 1. System Overview
 
 The Event Indexer is a background service that polls the Stellar/Soroban ledger for contract events emitted by VaultQuest pool contracts. These events are parsed and dispatched to the VaultQuest backend via the protected internal reconciliation endpoint (`POST /internal/reconcile`), which resolves transaction statuses in the database.
