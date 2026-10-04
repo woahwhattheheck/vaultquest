@@ -28,9 +28,23 @@ jobs:
           node-version: '24'
           cache: pnpm
           cache-dependency-path: subject/pnpm-lock.yaml
-      - name: Install existing locked frontend dependencies
-        working-directory: subject
-        run: pnpm install --frozen-lockfile --ignore-scripts --filter vaultquest...
+      - name: Install unchanged locked frontend dependencies without unrelated backend
+        shell: python
+        run: |
+          import pathlib, subprocess
+          root=pathlib.Path('subject').resolve()
+          workspace=root/'pnpm-workspace.yaml'
+          original=workspace.read_bytes()
+          needle=b'  - backend\n'
+          if original.count(needle)!=1:
+              raise RuntimeError('workspace selection anchor changed')
+          try:
+              workspace.write_bytes(original.replace(needle,b'',1))
+              subprocess.run(['pnpm','install','--frozen-lockfile','--ignore-scripts','--filter','vaultquest...'],cwd=root,check=True)
+          finally:
+              workspace.write_bytes(original)
+          if subprocess.check_output(['git','status','--porcelain'],cwd=root,text=True).strip():
+              raise RuntimeError('install changed tracked source or dependency pins')
       - name: Reproduce and repair the actual fee observation path
         run: python controller/repair.py subject evidence
       - name: Retain tested source on a new candidate ref only
