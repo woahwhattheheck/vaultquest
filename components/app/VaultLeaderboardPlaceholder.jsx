@@ -1,5 +1,6 @@
-import React from "react";
 "use client";
+
+import React from "react";
 
 import { useState, useEffect, useCallback } from "react";
 import { Award, Info, Minus, TrendingUp, UserPlus, AlertCircle, RefreshCw, Ticket, Trophy } from "lucide-react";
