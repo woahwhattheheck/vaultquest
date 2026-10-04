@@ -21,11 +21,30 @@ const BACKEND_URL =
 const PROBE_TIMEOUT_MS = 6000;
 const CONFIG_MAX_AGE_MS = 5 * 60 * 1000;
 
+// Share only an observation that is still running in this process. A settled
+// result is never cached, so the next refresh always probes dependencies again.
+let inFlightOverview = null;
+
+export async function GET() {
+  if (!inFlightOverview) {
+    inFlightOverview = collectOverview().finally(() => {
+      inFlightOverview = null;
+    });
+  }
+  const overview = await inFlightOverview;
+
+  // Each caller owns its response body even when the observation was shared.
+  return NextResponse.json(overview, {
+    status: overview.status === "degraded" ? 503 : 200,
+    headers: { "Cache-Control": "no-store" },
+  });
+}
+
 /**
  * Each dependency is observed independently. Missing or invalid observations
  * are degraded; an expected release value can never stand in for a live value.
  */
-export async function GET() {
+async function collectOverview() {
   const provenance = CANONICAL_PROVENANCE;
   const now = new Date();
   const [horizonProbe, sorobanProbe, indexerProbe, observedWasmHash, runtimeConfig] =
@@ -68,10 +87,7 @@ export async function GET() {
     checkedAt: now.toISOString(),
   });
 
-  return NextResponse.json(overview, {
-    status: overview.status === "degraded" ? 503 : 200,
-    headers: { "Cache-Control": "no-store" },
-  });
+  return overview;
 }
 
 async function fetchJson(url, options = {}) {

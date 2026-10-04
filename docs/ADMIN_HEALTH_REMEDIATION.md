@@ -120,3 +120,51 @@ flush/fallback, later success, failed retries and stale health:
 cd backend
 npm test -- tests/cache.spec.ts -t "never-successful indexer checkpoints"
 ```
+
+## 6. Overlapping refreshes
+
+Concurrent `GET /api/admin/health` calls in the same Node process share one
+running dependency observation. Each caller receives its own consumable response
+with the existing status and `Cache-Control: no-store`. The shared promise is
+cleared on fulfillment or rejection; the next refresh starts new probes. There
+is no completed-result TTL, persistent cache, or coordination between processes.
+With runtime configuration enabled, one observation makes six upstream requests:
+Horizon, three Soroban methods, indexer health, and runtime configuration.
+
+Run the focused route check with Node 20 or newer:
+
+```bash
+node --experimental-vm-modules scripts/check-admin-health-concurrency.mjs
+```
+
+The command executes the complete route and its fetch/timeout logic over actual
+loopback HTTP. Small import adapters isolate Next.js response serialization,
+health classifiers, and Stellar codecs; it does not measure those dependencies,
+a deployed Next.js server, real chain services, or cross-process sharing.
+All failures exit nonzero. It checks independently consumable responses, fresh
+observations after settlement, dependency failure/recovery, and collection
+rejection/recovery. The existing classifier and UI checks remain separate.
+
+One Node v24.19.0 execution on October 4, 2026, compared the preceding
+`f51dc69b` route with this change using 25 ms loopback response delays:
+
+| Flow | Callers | Before: upstream requests | After: upstream requests |
+| --- | ---: | ---: | ---: |
+| Overlapping refreshes | 25 | 150 | 6 |
+| Refresh after completion | 1 | 6 | 6 |
+| Dependency failure | 5 | 30 | 6 |
+| Refresh after dependency recovery | 1 | 6 | 6 |
+| Collection rejection | 5 | 30 | 6 |
+| Refresh after collection rejection | 1 | 6 | 6 |
+
+The initial burst used 96% fewer dependency requests. Its observed elapsed time
+was 329.013 ms before and 68.998 ms after; this is one controlled
+component observation, not a production latency estimate. Both complete
+executions exited 0. Source SHA-256 values printed by the command:
+
+- Before: `e0a217f4b98b9a6cd8d67dbbb3330c504dc3abd839d60ea512f1179577d41ac6`.
+- After: `ffa81807ac6bacb236875e2fd83b64b2113dcfbb7daf1577efded9cb025385ea`.
+
+To compare a retained original route, pass its file path followed by
+`--uncoalesced`; that mode expects one probe set per caller and changes only
+the check's request-count expectation. It does not modify the route source.
