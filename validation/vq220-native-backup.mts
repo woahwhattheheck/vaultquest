@@ -28,23 +28,29 @@ const cases = [
   { id: 'encoded-ipv6', host: '::1', user: 'ipv6@tenant', password: 'ipv6@fixture', database: 'ipv6 vault' }
 ];
 const receipts: unknown[] = [];
+// Prisma 5 treats escaped database path names literally. Bootstrap application
+// fixtures through psql and use a separate native ASCII-named lease database.
+const schemaSql = execFileSync(process.execPath, ['node_modules/prisma/build/index.js', 'migrate', 'diff', '--from-empty', '--to-schema-datamodel', 'prisma/schema.prisma', '--script'], { encoding: 'utf8' });
 const logger = pino({ level: 'silent' });
 for (const c of cases) {
   const dir = await mkdtemp(join(tmpdir(), 'vq220-' + c.id + '-'));
   const hostForUrl = c.host.includes(':') ? `[${c.host}]` : c.host;
   const databaseUrl = `postgresql://${encodeURIComponent(c.user)}:${encodeURIComponent(c.password)}@${hostForUrl}:${port}/${encodeURIComponent(c.database)}`;
+  const leaseDatabase = 'vq220_leases_' + c.id.replaceAll('-', '_');
+  const leaseUrl = `postgresql://postgres:${adminPassword}@127.0.0.1:${port}/${leaseDatabase}`;
   let prisma: PrismaClient | undefined;
   let leases: JobLeaseService | undefined;
   let target: string | undefined;
   try {
     admin(`CREATE ROLE ${qid(c.user)} WITH LOGIN SUPERUSER PASSWORD ${qlit(c.password)}`);
     admin(`CREATE DATABASE ${qid(c.database)} OWNER ${qid(c.user)}`);
-    execFileSync(process.execPath, ['node_modules/prisma/build/index.js', 'db', 'push', '--skip-generate'],
-      { env: { ...process.env, DATABASE_URL: databaseUrl }, stdio: 'inherit' });
+    sql(c.host, c.user, c.password, c.database, schemaSql);
+    admin(`CREATE DATABASE ${qid(leaseDatabase)}`);
+    sql('127.0.0.1', 'postgres', adminPassword, leaseDatabase, schemaSql);
     const sentinel = 'native fixture ' + c.id;
     sql(c.host, c.user, c.password, c.database,
       `CREATE TABLE native_backup_sentinel (id integer PRIMARY KEY, payload text NOT NULL); INSERT INTO native_backup_sentinel VALUES (220, ${qlit(sentinel)})`);
-    prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    prisma = new PrismaClient({ datasources: { db: { url: leaseUrl } } });
     leases = new JobLeaseService({ prisma, logger, ownerId: 'native-' + c.id, ttlMs: 30_000, heartbeatMs: 1_000 });
     const commands: string[] = [];
     let restoredRows: unknown;
@@ -98,9 +104,12 @@ for (const c of cases) {
     assert.equal(manifest.verificationStatus.verified, true);
     receipts.push({ case: c.id, host: c.host, username: c.user, database: c.database, commands,
       dumpBytes: dumped.length, checksum: backup.checksumSha256, restoredRows, restoredTableCount,
-      isolatedRestoreDatabaseRemoved: true, sourceSentinelUnchanged: true, partialArtifacts: 0,
+      isolatedRestoreDatabaseRemoved: true, sourceSentinelUnchanged: true, partialArtifacts: 0, leaseDatabaseSeparate: true,
       note: 'Observer delegates every spawn to actual defaultSpawn and checks real restored rows before actual dropdb; no remote storage adapter' });
     console.log('NATIVE_BACKUP_CASE_PASS', JSON.stringify(receipts.at(-1)));
+  } catch (error) {
+    console.error('NATIVE_BACKUP_CASE_FAILED', c.id, error);
+    throw error;
   } finally {
     await leases?.shutdown();
     await prisma?.$disconnect();
@@ -108,6 +117,7 @@ for (const c of cases) {
       admin(`DROP DATABASE ${qid(target)} WITH (FORCE)`);
     }
     admin(`DROP DATABASE IF EXISTS ${qid(c.database)} WITH (FORCE)`);
+    admin(`DROP DATABASE IF EXISTS ${qid(leaseDatabase)} WITH (FORCE)`);
     admin(`DROP ROLE IF EXISTS ${qid(c.user)}`);
     await rm(dir, { recursive: true, force: true });
   }

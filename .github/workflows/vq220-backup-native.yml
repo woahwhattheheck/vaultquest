@@ -1,4 +1,4 @@
-name: VQ220 backup and job lease native acceptance
+name: VQ220 backup and job lease native acceptance v2
 on:
   push:
     branches: [validation/vq220-backup-native-abaa-20261004]
