@@ -158,7 +158,7 @@ describe("GasPrioritySelector — Stellar fee isolation (#123)", () => {
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(lastCall.payload.feeStroops).toBe(5000);
     expect(lastCall.payload.resourceFeeStroops).toBe(4900);
-    expect(lastCall.payload.feeBid).toBe("0.000500 XLM");
+    expect(lastCall.payload.feeBid).toBe("0.0005000 XLM");
   });
 
   it("applies priority tier multipliers to the Stellar fee bid", async () => {
@@ -182,7 +182,7 @@ describe("GasPrioritySelector — Stellar fee isolation (#123)", () => {
       const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0];
       expect(lastCall.tier.key).toBe("high");
       expect(lastCall.payload.feeStroops).toBe(250);
-      expect(lastCall.payload.feeBid).toBe("0.000025 XLM");
+      expect(lastCall.payload.feeBid).toBe("0.0000250 XLM");
     });
   });
 

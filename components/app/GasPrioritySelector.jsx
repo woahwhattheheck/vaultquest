@@ -60,7 +60,7 @@ function formatUsd(value) {
 }
 
 function formatToken(value, token) {
-  const precision = token === "XLM" ? 6 : value < 1 ? 5 : 4;
+  const precision = token === "XLM" ? 7 : value < 1 ? 5 : 4;
   return `${Number(value || 0).toFixed(precision)} ${token}`;
 }
 
