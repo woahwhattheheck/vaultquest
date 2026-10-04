@@ -88,8 +88,14 @@ does not establish freshness. Failed updates to an existing cached checkpoint
 preserve its previous successful-sync timestamp even when the caller supplies
 both the event ID and error explicitly. Only a successful update advances that
 recorded history. Existing recorded-success lag and error handling are unchanged.
-This does not migrate old checkpoint data or change first-checkpoint persistence
-defaults; stored timestamps from older writers are not retroactively validated.
+If the first checkpoint update fails, both the cache and database create path
+store the Unix epoch (`1970-01-01T00:00:00.000Z`) as an explicit no-success marker.
+The existing database column remains non-nullable; this marker survives Redis
+serialization and database flushes, and the health response exposes it as `null`
+with degraded status. A later successful update replaces it with the actual sync
+time. Failed updates after a real success preserve that earlier timestamp.
+This does not migrate old checkpoint data; timestamps fabricated by older
+writers cannot be retroactively distinguished from recorded successful syncs.
 
 ```bash
 curl -s "${NEXT_PUBLIC_BACKEND_URL:-http://localhost:3001}/health/indexer" | jq .
@@ -104,4 +110,13 @@ covers healthy / stale / degraded without network access:
 
 ```bash
 pnpm vitest run lib/deployment-provenance.test.ts app/app/admin/settings/page.test.jsx
+```
+
+Checkpoint persistence regressions exercise the production ledger and cache
+classes over simulated database and Redis stores, including serialization,
+flush/fallback, later success, failed retries and stale health:
+
+```bash
+cd backend
+npm test -- tests/cache.spec.ts -t "never-successful indexer checkpoints"
 ```

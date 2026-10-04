@@ -539,7 +539,8 @@ export class LedgerService {
         ? input.lastError
         : existing?.lastError ?? null;
     if (this.cacheService) {
-      const lastSuccessSyncTime = input.success ? now : (existing?.lastSuccessSyncTime ?? now);
+      // The required Date column uses epoch as the absence of any successful sync.
+      const lastSuccessSyncTime = input.success ? now : (existing?.lastSuccessSyncTime ?? new Date(0));
       await this.cacheService.setCheckpoint({
         latestLedger: input.latestLedger,
         lastProcessedEventId,
@@ -558,7 +559,7 @@ export class LedgerService {
         lastProcessedEventId,
         lastSyncTime: now,
         lastError,
-        lastSuccessSyncTime: input.success ? now : undefined
+        lastSuccessSyncTime: input.success ? now : new Date(0)
       },
       update: {
         latestLedger: input.latestLedger,
@@ -595,6 +596,7 @@ export class LedgerService {
 
     const recordedSuccess = checkpoint.lastSuccessSyncTime;
     const lastSuccessSyncTime = recordedSuccess && Number.isFinite(recordedSuccess.getTime())
+      && recordedSuccess.getTime() !== 0
       ? recordedSuccess
       : null;
     const elapsedSinceLastSuccess = lastSuccessSyncTime
