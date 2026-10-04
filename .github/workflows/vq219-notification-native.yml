@@ -58,6 +58,7 @@ jobs:
             return !next || next.version !== old.version || next.integrity !== old.integrity;
           }).map(([name]) => name);
           console.log('Existing version/integrity changes:', JSON.stringify(changed));
+          console.log('Changed entry details:', JSON.stringify(changed.map(name => ({ name, before: before.packages[name], after: after.packages[name] })), null, 2));
           assert.deepEqual(changed, [], 'Do not upgrade or remove existing dependency pins');
           const manifest = JSON.parse(fs.readFileSync('package.json'));
           assert.deepEqual(after.packages[''].dependencies, manifest.dependencies);
@@ -68,6 +69,7 @@ jobs:
           git hash-object package-lock.json
           sha256sum package-lock.json
       - name: Preserve generated lock on this validation branch
+        if: always()
         working-directory: controller
         run: |
           set -euo pipefail
