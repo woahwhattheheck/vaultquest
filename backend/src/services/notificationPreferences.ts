@@ -157,8 +157,25 @@ export class NotificationPreferencesService {
 
   async history(wallet: string, limit = 100) {
     const { prefs } = await this.get(wallet);
+    // Apply delivery preferences before the limit so opted-out actions cannot
+    // hide an older notice that the wallet has chosen to receive.
+    const categories: Prisma.ActionLedgerWhereInput[] = [];
+    if (prefs.actionStatus) {
+      categories.push({
+        OR: [
+          { status: { not: "confirmed" } },
+          { actionType: { notIn: ["deposit", "claim", "select_winner"] } }
+        ]
+      });
+    }
+    for (const [actionType, preference] of [
+      ["deposit", "deposits"], ["claim", "winnings"], ["select_winner", "roundUpdates"]
+    ] as const) {
+      if (prefs[preference]) categories.push({ actionType, status: "confirmed" });
+    }
+    if (categories.length === 0) return [];
     const rows = await this.prisma.actionLedger.findMany({
-      where: { walletAddress: wallet, status: { not: "pending" } },
+      where: { walletAddress: wallet, status: { not: "pending" }, OR: categories },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       take: limit,
       select: { id: true, actionType: true, status: true, updatedAt: true }

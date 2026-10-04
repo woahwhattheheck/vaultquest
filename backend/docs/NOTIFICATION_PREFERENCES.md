@@ -21,7 +21,7 @@ The backend's existing CSRF check also applies to PUT. The Next.js proxy obtains
 
 ## In-app delivery
 
-`GET /notifications?wallet=G...&limit=100` requires the same wallet proof and reads that wallet's existing action ledger. Preferences are applied before the response reaches the notifications page. The default limit and maximum are 100; pending actions are omitted. Results describe recorded action outcomes, with no invented amounts, winners, or vault names.
+`GET /notifications?wallet=G...&limit=100` requires the same wallet proof and reads that wallet's existing action ledger. Preferences are applied before the response reaches the notifications page. The default limit and maximum are 100; pending actions are omitted. The limit counts enabled notices: preferences are applied in the database query before its limit, so newer opted-out actions do not hide older enabled notices. Results describe recorded action outcomes, with no invented amounts, winners, or vault names.
 
 | Recorded action | In-app category | Preference | Default |
 | --- | --- | --- | --- |
@@ -57,3 +57,9 @@ The two simultaneous-write regressions require a PostgreSQL runtime with reliabl
 [Before settings](../../docs/images/notification-preferences-before.png) · [After acknowledged save](../../docs/images/notification-preferences-after.png)
 
 The browser check used a synthetic signer, not an installed wallet extension, and compiled the source components rather than building the entire Next.js application. It is not a production rollout or native PostgreSQL contention result.
+
+### History-limit repair — 2026-10-04
+
+The maintained `counts only enabled notices toward the history limit` case adds 100 newer opted-out deposits, two older enabled notices, a foreign-wallet action, and a pending action. It checks the default and one-item limits, then a two-item deposit-only limit after a saved preference change. Run it with `pnpm exec vitest run tests/notification-preferences.spec.ts -t "counts only enabled notices"` from `backend`.
+
+Local Node 24.19.0 execution of the actual history and notification-mapping method bodies, with native TypeScript erasure and an injected query fixture, reproduced empty default history before the repair and both enabled notices afterward. All 48 combinations of the four optional preferences and limits 1/2/100 matched the existing mapping across all current action types/statuses and a foreign-wallet control; 14 combinations failed before the repair. This was a source-level query-fixture check. The new maintained Prisma/Fastify/PostgreSQL case was added but not run in that environment; the dated integration results above remain separate.

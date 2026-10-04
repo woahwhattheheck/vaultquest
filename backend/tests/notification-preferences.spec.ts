@@ -229,6 +229,42 @@ describe("notification preferences through Prisma and the actual app", () => {
     expect((await db.prisma.userNotificationPref.findUniqueOrThrow({ where })).encryptedPref).toEqual(future);
   });
 
+  it("counts only enabled notices toward the history limit", async () => {
+    const owner = wallet();
+    const other = wallet();
+    const base = Date.parse("2026-10-04T00:00:00Z");
+    function action(
+      actionType: Prisma.ActionLedgerCreateManyInput["actionType"],
+      status: Prisma.ActionLedgerCreateManyInput["status"],
+      offset: number,
+      walletAddress = owner.address
+    ): Prisma.ActionLedgerCreateManyInput {
+      return { id: randomUUID(), idempotencyKey: randomUUID(), walletAddress, actionType, status, updatedAt: new Date(base + offset) };
+    }
+    const prize = action("claim", "confirmed", 1);
+    const withdrawal = action("withdraw", "confirmed", 0);
+    const deposits = Array.from({ length: 100 }, (_, index) => action("deposit", "confirmed", index + 2));
+    await db.prisma.actionLedger.createMany({ data: [
+      prize, withdrawal, ...deposits,
+      action("withdraw", "confirmed", 102, other.address),
+      action("claim", "pending", 103)
+    ] });
+
+    const path = `/notifications?wallet=${owner.address}`;
+    const response = await get(path, signedHeaders(owner));
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.map((notice: { actionId: string }) => notice.actionId)).toEqual([prize.id, withdrawal.id]);
+    const first = await get(`${path}&limit=1`, signedHeaders(owner));
+    expect(first.statusCode).toBe(200);
+    expect(first.json().data.map((notice: { actionId: string }) => notice.actionId)).toEqual([prize.id]);
+
+    const onlyDeposits = { ...DEFAULT_NOTIFICATION_PREFS, actionStatus: false, roundUpdates: false, winnings: false, deposits: true };
+    expect((await put(owner, onlyDeposits, 0)).statusCode).toBe(200);
+    const enabled = await get(`${path}&limit=2`, signedHeaders(owner));
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.json().data.map((notice: { actionId: string }) => notice.actionId)).toEqual(deposits.slice(-2).reverse().map(deposit => deposit.id));
+  });
+
   it("filters actual persisted action, round, prize, and deposit notices before delivery", async () => {
     const owner = wallet();
     const other = wallet();
