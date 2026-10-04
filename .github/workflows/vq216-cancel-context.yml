@@ -1,0 +1,72 @@
+name: VQ216 cancellation context acceptance
+on:
+  push:
+    branches: [validation/vq216-cancel-context-20261004-a60c]
+permissions:
+  contents: read
+jobs:
+  cancellation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c66968bc262671a4dc6905e5ed3725256feabe6d
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the unchanged locked workspaces
+        run: pnpm install --frozen-lockfile
+      - name: Exercise cancellation boundaries before and after
+        shell: bash
+        run: |
+          set -euo pipefail
+          VQ_BASE=a9e22ed32e7cbc9647417ca15ab281f196cceccf
+          VQ_PRODUCT=c66968bc262671a4dc6905e5ed3725256feabe6d
+          VQ_RESULTS="$RUNNER_TEMP/vq216-cancel-context"
+          mkdir -p "$VQ_RESULTS"
+          node --version > "$VQ_RESULTS/runtime.txt"
+          pnpm --version >> "$VQ_RESULTS/runtime.txt"
+          pnpm exec vitest --version >> "$VQ_RESULTS/runtime.txt"
+          git show "$VQ_BASE:lib/retry-queue-client.js" > lib/retry-queue-client.js
+          git show "$VQ_BASE:components/app/VaultRetryQueue.jsx" > components/app/VaultRetryQueue.jsx
+          set +e
+          pnpm exec vitest run components/app/VaultRetryQueue.test.jsx -t "retires a cancel paused" --reporter=json --outputFile="$VQ_RESULTS/before.json" > "$VQ_RESULTS/before.log" 2>&1
+          VQ_BEFORE_STATUS=$?
+          set -e
+          git checkout "$VQ_PRODUCT" -- lib/retry-queue-client.js components/app/VaultRetryQueue.jsx
+          test "$VQ_BEFORE_STATUS" -eq 1
+          pnpm exec vitest run lib/retry-queue-client.test.js components/app/VaultRetryQueue.test.jsx --reporter=json --outputFile="$VQ_RESULTS/after.json" > "$VQ_RESULTS/after.log" 2>&1
+          git diff --exit-code -- lib/retry-queue-client.js lib/retry-queue-policy.js lib/retry-queue-client.test.js components/app/VaultRetryQueue.jsx components/app/VaultRetryQueue.test.jsx package.json pnpm-lock.yaml pnpm-workspace.yaml vitest.config.mjs tests/setup.ts
+          python3 - "$VQ_RESULTS" "$VQ_PRODUCT" "$VQ_BASE" <<'PY'
+          import hashlib, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          before = json.loads((root / 'before.json').read_text())
+          after = json.loads((root / 'after.json').read_text())
+          failures = [a for f in before['testResults'] for a in f['assertionResults'] if a['status'] == 'failed']
+          assert len(failures) == 4, before
+          assert all('retires a cancel paused' in a['fullName'] for a in failures), failures
+          assert before['numPassedTests'] == 0, before
+          assert after['numPassedTests'] == 41 and after['numFailedTests'] == 0 and after['numPendingTests'] == 0, after
+          paths = ['lib/retry-queue-client.js', 'components/app/VaultRetryQueue.jsx', 'components/app/VaultRetryQueue.test.jsx']
+          blobs = {}
+          for name in paths:
+              data = pathlib.Path(name).read_bytes()
+              blobs[name] = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          result = {'product_sha': sys.argv[2], 'baseline_sha': sys.argv[3], 'before_failed_selected': len(failures), 'after_passed': after['numPassedTests'], 'after_failed': after['numFailedTests'], 'after_pending': after['numPendingTests'], 'source_blobs': blobs, 'scope': 'Mounted React component with production client/policy/store; controlled ledger transport and awaited authentication; no live wallet, server, or chain execution.'}
+          (root / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vq216-cancel-context-${{ github.run_id }}
+          path: ${{ runner.temp }}/vq216-cancel-context/
+          if-no-files-found: error
+          retention-days: 14
