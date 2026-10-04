@@ -307,3 +307,20 @@ This exercises the mounted React component with the production client,
 policy and wallet store, controlled ledger transport and awaited
 authentication. It does not establish live wallet/server/chain execution,
 a full application build, product performance, upstream acceptance or payment.
+
+
+## Ledger pagination follow-through (October 4, 2026)
+
+`listQueueActions` follows the backend's existing `meta.pagination.next_cursor` until `has_more` is false. The default page size remains 50; wallet, status and authentication accompany each page. This lets an older pending/failed action remain visible when the newest page contains only confirmed actions. Repeated IDs use the most recently observed record before the unchanged wallet/status/cancellation filter runs.
+
+Array, `data.items` and `data.actions` responses without pagination retain their existing single-page behavior. Invalid pages or inconsistent/repeated cursors reject the read instead of reporting a falsely empty/complete queue. Later HTTP errors retain their status/code and are not retried. Reads are bounded by `maxPages` (default100; configurable integer1–1000); a remaining cursor at that bound raises `ledger_page_limit_reached` rather than returning partial rows. `limit` remains the backend page size, not a total-history limit.
+
+The existing UI already displays read failures, so this changes neither its layout nor retry/cancel/signing logic. Existing wallet/client epoch protection, backend source, package manifest and frozen lock are unchanged. This does not promise a cross-page database snapshot; actions are still re-read before writes through the existing preflight.
+
+Focused canonical command:
+
+```sh
+pnpm exec vitest run lib/retry-queue-client.test.js -t "retry queue ledger pagination|loads queue rows from the authenticated ledger" --maxWorkers=2
+```
+
+At parent `bc22d31fb3bd03162b24cca11e379532f2310f31`,13 of those17 executed cases fail and4 compatibility controls pass. The exact repaired source passes all17;11 unrelated client cases are filtered, not revalidated. This uses the real client/policy and existing Vitest configuration with controlled HTTP replies after the unchanged frozen pnpm installation. It is not live-backend, UI, full-suite, performance, acceptance or payment evidence. [Completed source-bound run](https://github.com/woahwhattheheck/vaultquest/actions/runs/37204333971).
