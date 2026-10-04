@@ -132,13 +132,21 @@ describe("BackupService core execution & manifest generation", () => {
   it.each([
     {
       databaseUrl: "postgres://ops%40tenant:p%40ss@db.example.com:5433/vault%20quest",
-      username: "ops@tenant", database: "vault quest", password: "p@ss"
+      host: "db.example.com", username: "ops@tenant", database: "vault quest", password: "p@ss"
     },
     {
       databaseUrl: "postgres://ops%2540tenant:p%2540ss@db.example.com:5433/vault%2520quest",
-      username: "ops%40tenant", database: "vault%20quest", password: "p%40ss"
+      host: "db.example.com", username: "ops%40tenant", database: "vault%20quest", password: "p%40ss"
+    },
+    {
+      databaseUrl: "postgres://user:secret@[::1]:5433/vaultquest",
+      host: "::1", username: "user", database: "vaultquest", password: "secret"
+    },
+    {
+      databaseUrl: "postgres://user:secret@[2001:db8::1234]:5433/vaultquest",
+      host: "2001:db8::1234", username: "user", database: "vaultquest", password: "secret"
     }
-  ])("decodes connection URL components exactly once for $database", async ({ databaseUrl, username, database, password }) => {
+  ])("builds PostgreSQL connection arguments for $host and $database", async ({ databaseUrl, host, username, database, password }) => {
     const spawn = vi.fn<SpawnFn>().mockResolvedValue({ exitCode: 0, stderr: "" });
     const svc = new BackupService({
       backupDir: BACKUP_DIR, databaseUrl, spawn, fs: makeFs(),
@@ -157,7 +165,7 @@ describe("BackupService core execution & manifest generation", () => {
     ]);
     for (const [, args, env] of spawn.mock.calls) {
       expect(args).toEqual(expect.arrayContaining([
-        "--host", "db.example.com", "--port", "5433", "--username", username
+        "--host", host, "--port", "5433", "--username", username
       ]));
       expect(env.PGPASSWORD).toBe(password);
     }

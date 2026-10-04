@@ -860,7 +860,7 @@ export class BackupService {
   private async runDatabaseCommand(command: "createdb" | "dropdb", dbName: string, ctx: JobLeaseContext): Promise<void> {
     const url = new URL(this.databaseUrl);
     const args = [
-      "--host", url.hostname || "localhost",
+      "--host", this.connectionHost(url),
       "--port", url.port || "5432",
       "--username", decodeURIComponent(url.username) || "postgres",
       "--no-password",
@@ -936,13 +936,19 @@ export class BackupService {
     }
   }
 
+  private connectionHost(url: URL): string {
+    // URL keeps IPv6 URI brackets; PostgreSQL's host parameter takes the address.
+    const host = url.hostname;
+    return (host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host) || "localhost";
+  }
+
   private buildPgDumpArgs(outputPath: string): {
     pgArgs: string[];
     pgEnv: Record<string, string | undefined>;
   } {
     const url = new URL(this.databaseUrl);
 
-    const host = url.hostname || "localhost";
+    const host = this.connectionHost(url);
     const port = url.port || "5432";
     const database = decodeURIComponent(url.pathname.replace(/^\//, "")) || "postgres";
     const username = decodeURIComponent(url.username) || "postgres";
@@ -974,7 +980,7 @@ export class BackupService {
   } {
     const url = new URL(this.databaseUrl);
 
-    const host = url.hostname || "localhost";
+    const host = this.connectionHost(url);
     const port = url.port || "5432";
     const username = decodeURIComponent(url.username) || "postgres";
     const password = decodeURIComponent(url.password || "");
