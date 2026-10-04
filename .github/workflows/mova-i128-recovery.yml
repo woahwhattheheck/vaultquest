@@ -1,0 +1,83 @@
+name: Mova i128 recovery check
+on:
+  push:
+    branches: [validation/mova-i128-recovery-rivet76f4-20261004]
+permissions:
+  contents: read
+jobs:
+  i128:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: woahwhattheheck/mova-store
+          ref: aaf9925a9dcea11d902a2f3936282b3ed7cdbff9
+          persist-credentials: false
+      - name: Obtain the exact retained two-file patch
+        run: |
+          python3 - <<'PY'
+          import urllib.request, pathlib
+          request=urllib.request.Request('https://raw.githubusercontent.com/woahwhattheheck/mova-store/22f78c1181ccf09bf567c0490db6a84f0b74c415/delivery.patch',headers={'User-Agent':'source-recovery'})
+          with urllib.request.urlopen(request,timeout=30) as response:
+              data=response.read(10000)
+          pathlib.Path('/tmp/mova-i128.patch').write_bytes(data)
+          PY
+          test "$(git hash-object lib/stellar/scval.ts)" = 839800b25b1a2f4cdc6fc911548787d02a479a52
+          test "$(git hash-object tests/lib/stellar/scval.test.ts)" = 57896428c0febe8cd0f14b17727210175e820aec
+          git apply /tmp/mova-i128.patch
+          test "$(git hash-object lib/stellar/scval.ts)" = 6aed8abb9655bb82b1e472497d91dda6b547a043
+          test "$(git hash-object tests/lib/stellar/scval.test.ts)" = 05f4ac58040c6024617f0df76256ab15f018b40b
+          mkdir -p "$RUNNER_TEMP/i128-evidence"
+          { git rev-parse HEAD; node --version; npm --version; sha256sum package.json package-lock.json; } | tee "$RUNNER_TEMP/i128-evidence/environment.log"
+      - name: Install unchanged locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund --fetch-retries=0 2>&1 | tee "$RUNNER_TEMP/i128-evidence/install.log"
+      - name: Format only the changed source and maintained test
+        run: |
+          ./node_modules/.bin/prettier --write lib/stellar/scval.ts tests/lib/stellar/scval.test.ts
+          git diff --exit-code -- package.json package-lock.json
+      - name: Execute the single maintained-file before and after selection
+        run: |
+          set -euo pipefail
+          cp lib/stellar/scval.ts "$RUNNER_TEMP/i128-fixed.ts"
+          git show HEAD:lib/stellar/scval.ts > lib/stellar/scval.ts
+          set +e
+          ./node_modules/.bin/vitest run tests/lib/stellar/scval.test.ts -t 'rejects .* before constructing XDR' --maxWorkers=2 --reporter=json --outputFile="$RUNNER_TEMP/i128-evidence/before.json" > "$RUNNER_TEMP/i128-evidence/before.log" 2>&1
+          code=$?
+          set -e
+          cp "$RUNNER_TEMP/i128-fixed.ts" lib/stellar/scval.ts
+          test "$code" -eq 1
+          python3 - <<'PY'
+          import json, os, pathlib
+          r=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'i128-evidence'/'before.json').read_text())
+          assert r['numFailedTests']==6, r
+          print('Baseline: six boundary regressions reached execution and failed')
+          PY
+          ./node_modules/.bin/vitest run tests/lib/stellar/scval.test.ts --maxWorkers=2 --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/i128-evidence/after.json" 2>&1 | tee "$RUNNER_TEMP/i128-evidence/after.log"
+          git diff --exit-code -- package.json package-lock.json
+      - name: Retain exact candidate and result
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,shutil,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'i128-evidence'
+          r=json.loads((out/'after.json').read_text())
+          assert r['success'] and r['numFailedTests']==0 and r['numPendingTests']==0
+          entries=[]
+          for name in ['lib/stellar/scval.ts','tests/lib/stellar/scval.test.ts']:
+              data=pathlib.Path(name).read_bytes()
+              dest=out/name
+              dest.parent.mkdir(parents=True,exist_ok=True)
+              dest.write_bytes(data)
+              entries.append({'path':name,'blob':hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest(),'sha256':hashlib.sha256(data).hexdigest()})
+          (out/'delivery.patch').write_bytes(subprocess.check_output(['git','diff','--','lib/stellar/scval.ts','tests/lib/stellar/scval.test.ts']))
+          report={'source_parent':'aaf9925a9dcea11d902a2f3936282b3ed7cdbff9','passed':r['numPassedTests'],'failed':r['numFailedTests'],'files':entries,'run':os.environ['GITHUB_RUN_ID']}
+          (out/'receipt.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mova-i128-recovered-evidence
+          path: ${{ runner.temp }}/i128-evidence/
+          retention-days: 7
+          if-no-files-found: error
