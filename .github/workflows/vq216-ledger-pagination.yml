@@ -1,0 +1,106 @@
+name: Retry queue ledger pagination delivery
+on:
+  push:
+    branches: [validation/vq216-pagination-rivet76f4-20261004]
+permissions:
+  contents: write
+jobs:
+  pagination:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SOURCE_PIN: bc22d31fb3bd03162b24cca11e379532f2310f31
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare only the pinned client and its maintained regression
+        run: |
+          set -euo pipefail
+          cp prepare.py "$RUNNER_TEMP/vq216-prepare.py"
+          git fetch --depth=1 origin "$SOURCE_PIN"
+          git checkout --detach "$SOURCE_PIN"
+          python3 "$RUNNER_TEMP/vq216-prepare.py"
+          mkdir -p "$RUNNER_TEMP/pagination-evidence"
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Use the existing frozen dependency graph
+        run: |
+          { node --version; pnpm --version; sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml; } | tee "$RUNNER_TEMP/pagination-evidence/environment.log"
+          pnpm install --frozen-lockfile 2>&1 | tee "$RUNNER_TEMP/pagination-evidence/install.log"
+      - name: Execute one focused before and after selection
+        run: |
+          set -euo pipefail
+          cp lib/retry-queue-client.js "$RUNNER_TEMP/retry-queue-fixed.js"
+          git show HEAD:lib/retry-queue-client.js > lib/retry-queue-client.js
+          pattern='retry queue ledger pagination|loads queue rows from the authenticated ledger'
+          set +e
+          pnpm exec vitest run lib/retry-queue-client.test.js -t "$pattern" --maxWorkers=2 --reporter=json --outputFile="$RUNNER_TEMP/pagination-evidence/before.json" > "$RUNNER_TEMP/pagination-evidence/before.log" 2>&1
+          code=$?
+          set -e
+          cp "$RUNNER_TEMP/retry-queue-fixed.js" lib/retry-queue-client.js
+          test "$code" -eq 1
+          python3 - <<'PY'
+          import json,os,pathlib
+          r=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'pagination-evidence/before.json').read_text())
+          assert r['numFailedTests']==13 and r['numPassedTests']==4, r
+          print('Baseline:13 failed,4 passed; unrelated cases filtered')
+          PY
+          pnpm exec vitest run lib/retry-queue-client.test.js -t "$pattern" --maxWorkers=2 --reporter=json --outputFile="$RUNNER_TEMP/pagination-evidence/after.json" > "$RUNNER_TEMP/pagination-evidence/after.log" 2>&1
+          git diff --exit-code -- package.json pnpm-lock.yaml pnpm-workspace.yaml components/app/VaultRetryQueue.jsx lib/retry-queue-policy.js
+      - name: Retain the source-only result on one new contributor branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,os,pathlib,subprocess,urllib.request
+          repo='woahwhattheheck/vaultquest'
+          assert os.environ['GITHUB_REPOSITORY']==repo
+          pin=os.environ['SOURCE_PIN']
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'pagination-evidence'
+          result=json.loads((out/'after.json').read_text())
+          assert result['success'] and result['numPassedTests']==17 and result['numFailedTests']==0, result
+          run=f'https://github.com/{repo}/actions/runs/'+os.environ['GITHUB_RUN_ID']
+          doc=pathlib.Path('docs/RETRY_QUEUE.md')
+          with doc.open('a') as stream:
+              stream.write('\n\n## Ledger pagination follow-through (October 4, 2026)\n\n'
+                  '`listQueueActions` follows the backend\'s existing `meta.pagination.next_cursor` until `has_more` is false. The default page size remains 50; wallet, status and authentication accompany each page. This lets an older pending/failed action remain visible when the newest page contains only confirmed actions. Repeated IDs use the most recently observed record before the unchanged wallet/status/cancellation filter runs.\n\n'
+                  'Array, `data.items` and `data.actions` responses without pagination retain their existing single-page behavior. Invalid pages or inconsistent/repeated cursors reject the read instead of reporting a falsely empty/complete queue. Later HTTP errors retain their status/code and are not retried. Reads are bounded by `maxPages` (default100; configurable integer1–1000); a remaining cursor at that bound raises `ledger_page_limit_reached` rather than returning partial rows. `limit` remains the backend page size, not a total-history limit.\n\n'
+                  'The existing UI already displays read failures, so this changes neither its layout nor retry/cancel/signing logic. Existing wallet/client epoch protection, backend source, package manifest and frozen lock are unchanged. This does not promise a cross-page database snapshot; actions are still re-read before writes through the existing preflight.\n\n'
+                  'Focused canonical command:\n\n```sh\npnpm exec vitest run lib/retry-queue-client.test.js -t "retry queue ledger pagination|loads queue rows from the authenticated ledger" --maxWorkers=2\n```\n\n'
+                  f'At parent `{pin}`,13 of those17 executed cases fail and4 compatibility controls pass. The exact repaired source passes all17;11 unrelated client cases are filtered, not revalidated. This uses the real client/policy and existing Vitest configuration with controlled HTTP replies after the unchanged frozen pnpm installation. It is not live-backend, UI, full-suite, performance, acceptance or payment evidence. [Completed source-bound run]({run}).\n')
+          def api(path,body=None):
+              request=urllib.request.Request(f'https://api.github.com/repos/{repo}/'+path,data=None if body is None else json.dumps(body).encode(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json','Accept':'application/vnd.github+json','User-Agent':'source-publication'})
+              with urllib.request.urlopen(request,timeout=30) as response:
+                  return json.load(response)
+          parent=api('git/commits/'+pin)
+          entries=[]
+          for name in ['lib/retry-queue-client.js','lib/retry-queue-client.test.js','docs/RETRY_QUEUE.md']:
+              data=pathlib.Path(name).read_bytes()
+              blob=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              created=api('git/blobs',{'content':base64.b64encode(data).decode(),'encoding':'base64'})
+              assert created['sha']==blob
+              entries.append({'path':name,'mode':'100644','type':'blob','sha':blob})
+              dest=out/name
+              dest.parent.mkdir(parents=True,exist_ok=True)
+              dest.write_bytes(data)
+          tree=api('git/trees',{'base_tree':parent['tree']['sha'],'tree':entries})
+          commit=api('git/commits',{'message':'fix(retry-queue): load older ledger pages before filtering [skip ci]\n\nPreserve the existing cursor protocol, wallet/status filters, auth, retry/cancel epochs and dependency graph. Bound incomplete reads and retain later HTTP errors rather than inventing an empty queue.\n\nFocused source-bound canonical Vitest run: parent13 failures/4 passes; candidate17 passes,11 unrelated cases filtered. Existing guide contains exact command, limits and source pin. '+run,'tree':tree['sha'],'parents':[pin]})
+          ref=api('git/refs',{'ref':'refs/heads/fix/vq216-ledger-pagination-rivet76f4-20261004','sha':commit['sha']})
+          receipt={'parent':pin,'commit':commit['sha'],'tree':tree['sha'],'ref':ref['ref'],'files':entries,'passed':17,'failed':0,'filtered':11,'run':run}
+          (out/'publication.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          (out/'delivery.patch').write_bytes(subprocess.check_output(['git','diff','--','lib/retry-queue-client.js','lib/retry-queue-client.test.js','docs/RETRY_QUEUE.md']))
+          print(json.dumps(receipt,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vq216-pagination-evidence
+          path: ${{ runner.temp }}/pagination-evidence/
+          retention-days: 7
+          if-no-files-found: error
