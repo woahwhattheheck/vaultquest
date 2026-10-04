@@ -130,3 +130,111 @@ The native and maintained checks reuse Node 24.19.0 and React/ReactDOM 18.3.1. T
 Scoped ESLint 8.57.1 with the repository's Next 14.2.33 configuration passes with zero errors or warnings. The product-term check passes for the sparse checkout containing the changed files, and the source whitespace check passes. These are not whole-repository lint or product-term claims.
 
 No dependencies were installed and no manifests, lockfiles, production aliases, or committed test configuration changed. A full Next build, route-smoke/E2E suite, real nanostores integration, authenticated action ledger/Postgres, deployed backend, and wallet/chain actions were not exercised. Hosted workflow approval and maintainer acceptance remain separate from these local results.
+
+## Canonical workspace installation and retry acceptance — 2026-10-04
+
+The preceding runtime receipts remain historical at their stated source and
+dependency pins. This continuation makes the original three-file retry command
+run after a normal installation of the repository's complete pnpm workspace.
+
+### Reused dependency change
+
+Product commit `15fde845ffc9812f5e7fe6d1291c2e8cdc2f4041` is a sole-parent
+successor of the released retry source
+`9519375bd79799e4a744eb8b5420c2452d4e2332`. It changes only the root
+`pnpm-workspace.yaml` and `pnpm-lock.yaml`, reusing their exact tested blobs from
+[the existing canonical-install contribution](https://github.com/woahwhattheheck/vaultquest/commit/08915ce6cf89fcbc238319599d77ff41ff30bc7b).
+The donor's dependency diagnosis and generated-lock review are recorded in
+[its existing report](https://github.com/woahwhattheheck/vaultquest/blob/08915ce6cf89fcbc238319599d77ff41ff30bc7b/docs/FEE_OBSERVATION_VALIDITY.md).
+
+All three workspace manifests match the donor by Git blob:
+
+| Manifest | Unchanged blob |
+| --- | --- |
+| `package.json` | `72f6c4c7ca14263cb9e5836368bb399798838d0d` |
+| `backend/package.json` | `89c18f365b2200fb693134557b066810a89861a3` |
+| `stellar-wallet-connect/package.json` | `453b5d24dc77ae19ee91b9baddb0c82cbe582c40` |
+
+The old root workspace and lock also match the donor's broken preimages exactly.
+The reused postimages bound Vitest to compatible 3.2.x and Vite to 6.4.x, fill
+the already-declared backend dependency edges, and supply the existing compatible
+WebSocket provider to the Solana subscription subtree. All other security
+overrides and all 15 existing false build-script permissions are retained.
+No lock regeneration or additional dependency selection was performed here.
+
+| Dependency file | Reused blob |
+| --- | --- |
+| `pnpm-workspace.yaml` | `24b0f88d509b3fb6d4b62ce0918366697aacaf7f` |
+| `pnpm-lock.yaml` | `8c60c191836213cf9024f4c65616fbf59537e756` |
+
+Retry policy, client, component, wallet store, backend cancellation, maintained
+tests and test configuration are unchanged. The report-only successor adds this
+section to the existing guide.
+
+### Single native execution
+
+[Run 37199963454, job 111429450359](https://github.com/woahwhattheheck/vaultquest/actions/runs/37199963454/job/111429450359)
+completed successfully on Ubuntu 24.04.5. Its isolated controller commit is
+`3479d46e57e002fe678d6bd17c944043e96fabec`; the controller checked out the exact
+product commit `15fde845ffc9812f5e7fe6d1291c2e8cdc2f4041` and asserted all three
+manifest, both dependency-file and all three test-file blobs before execution.
+The validation workflow does not enter this PR.
+
+Actual runtime: Node **22.23.3**, pnpm **10.28.2**, Vitest **3.2.7**, Vite
+**6.4.3**, jsdom **25.0.1**, React **18.3.1**. The normal installation used:
+
+```bash
+pnpm install --frozen-lockfile --reporter=append-only
+```
+
+It installed all **3 workspace projects**, **1,451 packages**, and reported
+completion in **19 seconds**. The lock was already current and its resolution
+step was skipped. No lifecycle-policy override or peer-ignore flag was supplied.
+
+The original acceptance selection ran once, with JSON reporting added:
+
+```bash
+pnpm exec vitest run \
+  lib/retry-queue-policy.test.js \
+  lib/retry-queue-client.test.js \
+  components/app/VaultRetryQueue.test.jsx \
+  --reporter=default --reporter=json --outputFile=evidence/retry-tests.json
+```
+
+| Maintained file | Passed | Failed | Pending |
+| --- | ---: | ---: | ---: |
+| `lib/retry-queue-policy.test.js` | 13 | 0 | 0 |
+| `lib/retry-queue-client.test.js` | 12 | 0 | 0 |
+| `components/app/VaultRetryQueue.test.jsx` | 25 | 0 | 0 |
+| **Total** | **50** | **0** | **0** |
+
+Vitest reported **2.62 seconds** total duration; this is a test-run duration,
+not a product performance benchmark. The JSON success, file count, no-failure,
+no-pending and passed-equals-total guards all passed. Both dependency-file
+SHA-256 values were unchanged after installation and after tests, and
+`git diff --exit-code` passed.
+
+The ordinary `vitest.config.mjs` and `tests/setup.ts` were used. The maintained
+component tests import the real workspace wallet store, whose `atom` import
+resolves through its own `nanostores` dependency; no wallet-store alias or
+replacement package was added. The diagnostic `nanostores: false` field in the
+runner JSON checks only the root `node_modules/nanostores` path and does not
+describe the nested wallet workspace's dependency resolution. Existing browser
+API mocks, controlled ledger/client collaborators, jsdom `window.scrollTo`
+diagnostics and React `act` warnings remain visible and unchanged.
+
+### Retained receipt and limits
+
+Artifact [11302628017](https://github.com/woahwhattheheck/vaultquest/actions/runs/37199963454/artifacts/11302628017)
+contains nine files: immutable source/version records, asserted blobs,
+dependency hashes, raw installation and test logs, runner versions, and the
+JSON test report. The downloaded ZIP is **6,974 bytes**; its SHA-256 was
+independently verified as
+`f45e5230e994c757475377bd7a3cdb848cc3d1bc51e0be0219754af3032f5297`.
+The JSON report confirms the 50/0/0 result above.
+
+This closes the normal workspace installation and original retry-selection
+gap for this source. It does not establish a full Next application build,
+whole-repository test pass, browser/E2E, authenticated backend/Postgres,
+signing-provider, live chain, deployment, upstream acceptance, award or payment
+result. No baseline replay or additional test suite was run.
