@@ -1,0 +1,51 @@
+name: VQ215 canonical indexer acceptance
+
+on:
+  push:
+    branches: [validation/vq215-canonical-pnpm-ledger0938]
+
+permissions:
+  contents: read
+
+jobs:
+  canonical:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9c8a809f8b91ea66d1a3370cc562003bc036d9e8
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+          run_install: false
+      - name: Install the unchanged workspace manifests from the corrected frozen lock
+        timeout-minutes: 6
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/product-head.txt
+          node --version | tee evidence/node-version.txt
+          pnpm --version | tee evidence/pnpm-version.txt
+          sha256sum pnpm-workspace.yaml pnpm-lock.yaml > evidence/dependencies.sha256
+          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | tee evidence/install.log
+          sha256sum -c evidence/dependencies.sha256
+      - name: Run the existing indexer configuration acceptance
+        timeout-minutes: 3
+        run: |
+          pnpm --dir backend exec vitest run tests/indexerConfig.spec.ts --reporter=default --reporter=json --outputFile=../evidence/indexer.json 2>&1 | tee evidence/indexer.log
+          sha256sum -c evidence/dependencies.sha256
+          git diff --exit-code
+      - name: Retain the source-bound install and indexer output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vq215-canonical-indexer
+          path: evidence/
+          retention-days: 7
