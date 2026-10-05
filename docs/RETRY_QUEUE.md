@@ -335,9 +335,85 @@ database snapshot while ledger records change. Existing authoritative
 retry/cancel preflight, wallet/client epochs, state updates and signing
 behavior are unchanged.
 
-This is a source-only continuation. The route, response encoder, cursor query,
-client and component caller were inspected at the parent source. No tests,
-fixtures, builds, browser/device runs, authenticated backend requests or chain
-actions were executed or added. The earlier 50-case and 41-case receipts
-remain historical at their own source pins and do not validate this change.
-Maintainer acceptance and native validation remain pending.
+The initial pagination publication at
+`06c2fa835e6b782c099d0af6d29a0d3a98d0d285` was source-only. The route,
+response encoder, cursor query, client and component caller were inspected;
+no tests or runtime checks were executed then. The earlier 50-case and
+41-case receipts remain historical at their own source pins.
+
+### Pagination execution — 2026-10-05
+
+This test/evidence-only successor executes the unchanged pagination client,
+policy and component from `06c2fa835e6b782c099d0af6d29a0d3a98d0d285`.
+It adds 20 request-client cases in `lib/retry-queue-pagination.test.js` and
+four mounted React cases in
+`components/app/VaultRetryQueue.pagination.test.jsx`. The original 54
+policy/client/component cases remain unchanged and are included in this run.
+
+Normal `pnpm install --frozen-lockfile` completed for all three workspace
+projects and 1,451 packages using the repository's pinned pnpm **10.28.2**.
+It used the existing build-script policy, with no approval override, ignored
+peer flag, dependency-file edit or lock regeneration. Actual test runtime:
+Node **22.22.0**, Vitest **3.2.7**, Vite **6.4.3**, jsdom **25.0.1**, React
+**18.3.1**, Testing Library React **14.3.1** and Framer Motion **11.18.2**.
+These are local results, not the earlier hosted Node 22.23.3 receipt or the
+contribution guide's Node 20 matrix.
+
+```bash
+pnpm exec vitest run \
+  lib/retry-queue-policy.test.js \
+  lib/retry-queue-client.test.js \
+  lib/retry-queue-pagination.test.js \
+  components/app/VaultRetryQueue.test.jsx \
+  components/app/VaultRetryQueue.pagination.test.jsx \
+  --maxWorkers=1 --no-file-parallelism
+```
+
+The final selection passed **78 tests in five files, with zero failures or
+pending cases**. JSON reporting was also enabled and the counts were checked.
+The new request-client cases find pending/failed actions after 50 confirmed
+records; preserve wallet, optional status and page limit; renew the injected
+authentication headers on each page; preserve legacy response shapes; and
+reject inconsistent metadata, invalid later lists, repeated cursors, later
+HTTP/authentication failure and history exceeding 100 pages. Exactly 100
+pages ending normally remains valid. Positive continuing fixtures use UUID
+cursors, echoed limits and full pages; deliberately malformed responses are
+separate robustness cases.
+
+The mounted component imports the real production client, policy and workspace
+wallet store. Its controlled transport holds the second page: no partial rows
+are rendered while loading, older actions appear after completion, and a
+later HTTP error displays its stable message without partial rows. Both a
+late success and late failure from wallet A are ignored after wallet B has
+loaded. The tests perform ledger GET simulations only, with no signing or
+mutation requests.
+
+For a focused before/after check, only the client was temporarily replaced by
+its exact predecessor from `bc22d31fb3bd03162b24cca11e379532f2310f31`.
+The two new confirmed-prefix regressions both failed: the client returned an
+empty queue instead of the older pending/failed actions, and the mounted
+component dispatched only the first page. The other 22 new cases were skipped
+by the name filter. Restoring the current client reproduces the exact tested
+Git blob; no production repair was required.
+
+| Executed runtime source | Unchanged Git blob |
+| --- | --- |
+| `lib/retry-queue-client.js` | `4a77a1e69ca36e49a5be3e6bc55a8ade61dbb765` |
+| `components/app/VaultRetryQueue.jsx` | `080ba6439df325171daaf32a45a6922f1f5bbf33` |
+| `lib/retry-queue-policy.js` | `f2dd11c733e28f4e752aebbe1244d961d3ca76c4` |
+
+The compact [execution receipt](evidence/retry-pagination-20261005.json)
+records both executions, source/test blobs, versions and dependency hashes.
+Scoped ESLint with `--max-warnings=0`, the whole-repository product-term
+check and source whitespace check pass. Existing asynchronous React `act`
+warnings and jsdom `scrollTo` diagnostics were visible, not suppressed.
+
+This does not execute a real browser/device, full Next build, whole-repository
+test selection, route-smoke/E2E, Postgres, authenticated backend, signing
+provider or chain. The dashboard's default provider sends only the wallet
+address, whereas the backend requires a signed wallet challenge or service
+credential; that preexisting authentication integration is not repaired or
+validated here. Synthetic signature/timestamp headers test provider renewal,
+not cryptographic authentication. Cursor traversal is not a database snapshot.
+The preceding upstream workflows require maintainer authorization; local
+results do not assert hosted CI success or acceptance.
