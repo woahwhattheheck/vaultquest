@@ -6,7 +6,8 @@ rows and `setTimeout` fake retries are not used in production.
 ## Flow
 
 1. **Load** — `GET /actions?wallet=<connected>` with wallet auth headers.
-   Only `pending` and `failed` rows for the connected wallet are shown.
+   Follow the ledger's advertised cursors before selecting `pending` and
+   `failed` rows for the connected wallet. Incomplete loads show an error.
 2. **Retry policy** — `lib/retry-queue-policy.js` decides whether an error
    code is retryable (`WALLET_REJECTED`, `RPC_TIMEOUT`, `INSUFFICIENT_FEES`,
    `NETWORK_ERROR`, `WALLET_TIMEOUT`, `TIMEOUT`). Confirmed / submitted /
@@ -307,3 +308,36 @@ This exercises the mounted React component with the production client,
 policy and wallet store, controlled ledger transport and awaited
 authentication. It does not establish live wallet/server/chain execution,
 a full application build, product performance, upstream acceptance or payment.
+
+## Complete ledger pagination — 2026-10-05
+
+The continuation from `bc22d31fb3bd03162b24cca11e379532f2310f31` fixes
+`listQueueActions` stopping after its first 50 records. Newer confirmed records
+could fill that page and hide older pending or failed actions. The existing
+backend already returns `meta.pagination.has_more` and `next_cursor`, and
+accepts that cursor alongside the same wallet, optional status and page limit.
+
+The client now follows only those server-provided cursors, preserving the
+authenticated request path and filters on every page. It selects queue rows
+after reaching the advertised end. Legacy single-page arrays and
+`items`/`actions` envelopes remain supported when the first response has no
+pagination metadata. Once pagination starts, missing or inconsistent metadata,
+an invalid record-list shape, repeated cursors and more than 100 pages reject
+the load. A later HTTP/authentication failure also rejects the whole load.
+The existing component displays its load error instead of treating a partial
+result as a complete or empty queue.
+
+The bound permits at most 100 requests per load: 5,000 ledger records at the
+unchanged default page size of 50, or up to 10,000 with the backend's maximum
+page size of 100. A larger history remains an explicit incomplete-load error;
+no claim of unlimited history is made. Cursor traversal does not provide a
+database snapshot while ledger records change. Existing authoritative
+retry/cancel preflight, wallet/client epochs, state updates and signing
+behavior are unchanged.
+
+This is a source-only continuation. The route, response encoder, cursor query,
+client and component caller were inspected at the parent source. No tests,
+fixtures, builds, browser/device runs, authenticated backend requests or chain
+actions were executed or added. The earlier 50-case and 41-case receipts
+remain historical at their own source pins and do not validate this change.
+Maintainer acceptance and native validation remain pending.
