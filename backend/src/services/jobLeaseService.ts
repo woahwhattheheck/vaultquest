@@ -100,7 +100,7 @@ export class JobLeaseService {
     }
     this.logger = opts.logger;
     this.ttlMs = opts.ttlMs ?? 30_000;
-    this.heartbeatMs = opts.heartbeatMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3));
+    this.heartbeatMs = opts.heartbeatMs ?? Math.max(1, Math.floor(this.ttlMs / 3));
     this.now = opts.now ?? (() => new Date());
   }
 
