@@ -173,7 +173,7 @@ function QueuedAction({ action, onRetry, onCancel, onDismiss }) {
         )}
         <button
           type="button"
-          onClick={isPending ? handleCancel : () => onDismiss(action)}
+          onClick={isPending ? handleCancel : handleDismiss}
           disabled={isProcessing}
           className="vq-btn-ghost px-2 py-1.5 text-xs"
           aria-label={isPending ? "Cancel pending action" : "Dismiss"}
