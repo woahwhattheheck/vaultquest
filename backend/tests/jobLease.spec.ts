@@ -206,8 +206,9 @@ describe("JobLeaseService.runWithLease", () => {
     expect(overlap).toEqual({ status: "skipped", reason: "local_overlap" });
     expect(store.calls).toBe(1);
 
-    await svc.shutdown();
+    const shutdown = svc.shutdown();
     completeAcquire();
+    await shutdown;
     expect(await pending).toEqual({ status: "skipped", reason: "shutting_down" });
     expect(ran).toBe(0);
     expect(store.peek("cron:pending")?.ownerId).toBe("");
@@ -337,9 +338,10 @@ describe("JobLeaseService.runWithLease", () => {
     const blocked = await b.runWithLease("cron:backup", async () => false);
     expect(blocked.status).toBe("skipped");
 
-    await a.shutdown();
+    const shutdown = a.shutdown();
     release();
     await running;
+    await shutdown;
 
     const after = await b.runWithLease("cron:backup", async () => true);
     expect(after.status).toBe("ran");
