@@ -49,7 +49,7 @@ interface Logger {
   debug: (...args: any[]) => void;
 }
 
-type CacheEntry<T> = { value: T; accessedAt: Date };
+type CacheEntry<T> = { value: T };
 
 /**
  * On-wire format for values stored by `getOrSet`. Redis keys are kept alive
@@ -151,23 +151,26 @@ export class CacheService {
 
   // --- helpers ---
 
+  private read<K, V>(map: Map<K, CacheEntry<V>>, key: K): V | null {
+    const entry = map.get(key);
+    if (!entry) return null;
+    // Reinsertion records access order, even within one millisecond or after
+    // the wall clock moves backwards. A missing read must not create an entry.
+    map.delete(key);
+    map.set(key, entry);
+    return entry.value;
+  }
+
   private touch<K, V>(map: Map<K, CacheEntry<V>>, key: K, value: V): void {
-    const now = new Date();
-    map.set(key, { value, accessedAt: now });
+    map.delete(key);
+    map.set(key, { value });
     this.evictIfNeeded(map);
   }
 
   private evictIfNeeded<K, V>(map: Map<K, CacheEntry<V>>): void {
     if (map.size <= this.maxEntries) return;
-    let oldestKey: K | undefined;
-    let oldest = new Date(map.size ? Infinity : 0);
-    for (const [k, entry] of map.entries()) {
-      if (entry.accessedAt < oldest) {
-        oldest = entry.accessedAt;
-        oldestKey = k;
-      }
-    }
-    if (oldestKey !== undefined) map.delete(oldestKey);
+    const oldest = map.keys().next();
+    if (!oldest.done) map.delete(oldest.value);
   }
 
   // --- indexer checkpoint ---
@@ -299,10 +302,7 @@ export class CacheService {
         this.logger.warn({ err, txHash }, "Redis getPendingEvent failed, falling back to memory");
       }
     }
-    const entry = this.pendingMap.get(txHash);
-    if (!entry) return null;
-    entry.accessedAt = new Date();
-    return entry.value;
+    return this.read(this.pendingMap, txHash);
   }
 
   /**
@@ -371,10 +371,7 @@ export class CacheService {
    * @returns Cached metadata or null
    */
   async getAssetMetadata(asset: string): Promise<AssetMetadata | null> {
-    const entry = this.assetMap.get(asset);
-    if (!entry) return null;
-    entry.accessedAt = new Date();
-    return entry.value;
+    return this.read(this.assetMap, asset);
   }
 
   /**
@@ -688,10 +685,7 @@ export class CacheService {
    * @returns Cached config record or null
    */
   async getProtocolConfig(key: string): Promise<ProtocolConfigRecord | null> {
-    const entry = this.configMap.get(key);
-    if (!entry) return null;
-    entry.accessedAt = new Date();
-    return entry.value;
+    return this.read(this.configMap, key);
   }
 
   /**
